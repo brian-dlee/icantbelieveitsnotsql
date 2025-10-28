@@ -1,4 +1,5 @@
 use clap::Parser;
+use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser as SQLParser, ParserError};
 use std::fs::File;
@@ -47,7 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Ok(ast) => {
-            println!("{:#?}", ast);
+            for statement in ast {
+                match statement {
+                    Statement::CreateTable(create_table) => {
+                        eprintln!("")
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
