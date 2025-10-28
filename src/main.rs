@@ -1,6 +1,6 @@
 use clap::Parser;
 use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser as SQLParser;
+use sqlparser::parser::{Parser as SQLParser, ParserError};
 use std::fs::File;
 use std::io::{self, Read};
 
@@ -21,9 +21,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let dialect = GenericDialect {};
-    let ast = SQLParser::parse_sql(&dialect, &sql)?;
 
-    println!("{:#?}", ast);
+    fn print_block(text: &str, line_start: usize, line_end: usize) -> String {
+        let lines: Vec<&str> = text
+            .split("\n")
+            .skip(line_start)
+            .take(line_end - line_start)
+            .collect();
+
+        return lines.join("\n");
+    }
+
+    match SQLParser::parse_sql(&dialect, &sql) {
+        Err(err) => match err {
+            ParserError::ParserError(msg) => {
+                println!("{}", print_block(&sql, 33, 34));
+
+                eprintln!("parser error: {}", msg)
+            }
+            ParserError::TokenizerError(msg) => {
+                eprintln!("tokenizer error: {}", msg)
+            }
+            ParserError::RecursionLimitExceeded => {
+                eprintln!("recursion limit exceeded")
+            }
+        },
+        Ok(ast) => {
+            println!("{:#?}", ast);
+        }
+    }
 
     Ok(())
 }
