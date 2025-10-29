@@ -5,3 +5,7 @@ designed to be the thinnest possible layer between SQL and a desired programming
 language. Write SQL files directly, and construct callable code with zero dependencies.
 Well zero dependences is the goal, but initially there may be some dependency on database
 drivers.
+
+NOTES:
+ - If CockroachDB support is required then I'll need a different parser. sqlparser-rs supports a lot of dialects but not CockroachDB
+ - A tokenized stream during parsing will be much better

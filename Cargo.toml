@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.50", features = ["derive"] }
 sqlparser = "0.59.0"
+thiserror = "2.0.17"
