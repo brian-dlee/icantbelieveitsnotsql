@@ -1,0 +1,4 @@
+[generate]
+dialect = "sqlite"
+queries-dir = "./queries"
+schema-file = "schema.sql"
