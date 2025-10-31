@@ -1,5 +1,5 @@
--- SELECT
-SELECT id, email, created_at
+-- get_user_by_id
+SELECT id AS user_id, email, created_at
 FROM users
 WHERE id = ?;
 

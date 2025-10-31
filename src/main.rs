@@ -1,11 +1,10 @@
 use clap::Parser;
 use serde::Deserialize;
-use sqlparser::ast::{Statement, TableFactor};
+use sqlparser::ast::{Expr, SelectItem, Statement, TableFactor};
 use sqlparser::dialect;
 use sqlparser::parser::{Parser as SQLParser, ParserError};
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs::{self};
 use std::path::PathBuf;
 use thiserror;
 use toml;
@@ -40,7 +39,11 @@ struct Args {
     project_path: Option<PathBuf>,
 }
 
-fn print_block(text: &str, line_start: i32, line_end: i32) -> String {
+fn extract_debug_block_with_line_number_range(
+    text: &str,
+    line_start: i32,
+    line_end: i32,
+) -> String {
     let mut block_lines = Vec::new();
 
     for (offset, line) in text
@@ -102,8 +105,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let content = fs::read_to_string(&config_file_path)?;
     let config: Config = toml::from_str(&content)?;
 
-    println!("{:#?}", config);
-
     let selected_dialect = &config.generate.dialect.unwrap_or(String::from("generic"));
     let sql_dialect = SQLDialect::from_str(&selected_dialect)?;
 
@@ -130,31 +131,152 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(PathBuf::from("queries")),
     );
 
-    let mut sql = String::new();
-
     println!("Reading schema file: {}", schema_file_path.display());
 
-    File::open(schema_file_path)?.read_to_string(&mut sql)?;
+    let sql = match fs::read_to_string(&schema_file_path) {
+        Err(err) => {
+            eprintln!(
+                "Failed to read schema file \"{}\": {}",
+                schema_file_path.display(),
+                err
+            );
+            std::process::exit(1);
+        }
+        Ok(contents) => contents,
+    };
 
-    let mut tables: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let schema = match parse_schema_file(&sql, parser_dialect) {
+        Err(err) => {
+            eprintln!(
+                "Failed to parse schema file \"{}\": {}",
+                schema_file_path.display(),
+                err
+            );
+            std::process::exit(1);
+        }
+        Ok(result) => result,
+    };
 
-    match SQLParser::parse_sql(parser_dialect, &sql) {
-        Err(err) => match err {
-            ParserError::ParserError(msg) => {
-                let line_number = extract_line_number_from_parse_error(&msg);
+    let mut queries: Vec<QueryParseResult> = Vec::new();
 
-                println!("{}", print_block(&sql, line_number - 2, line_number + 2));
+    for query_file_path in fs::read_dir(&queries_dir_path)? {
+        match query_file_path {
+            Ok(dir_entry) => {
+                let path = dir_entry.path();
 
-                eprintln!("parser error: {}", msg)
+                println!("Reading {}", path.display());
+
+                let sql = match fs::read_to_string(&path) {
+                    Err(err) => {
+                        eprintln!("Failed to read query file \"{}\": {}", path.display(), err);
+                        continue;
+                    }
+                    Ok(contents) => contents,
+                };
+
+                match parse_query_file(&sql, parser_dialect) {
+                    Err(err) => {
+                        eprintln!(
+                            "Failed to parser query file \"{}\": {}",
+                            path.display(),
+                            err
+                        );
+                        continue;
+                    }
+                    Ok(result) => {
+                        queries.extend(result);
+                    }
+                };
             }
-            ParserError::TokenizerError(msg) => {
-                eprintln!("tokenizer error: {}", msg)
+            Err(err) => {
+                eprintln!(
+                    "Failed to read directory \"{}\": {}",
+                    queries_dir_path.display(),
+                    err
+                );
             }
-            ParserError::RecursionLimitExceeded => {
-                eprintln!("recursion limit exceeded")
-            }
-        },
+        }
+    }
+
+    println!(" ---------- SCHEMA --------- ");
+    println!("{:#?}", schema.table_fields);
+    println!("");
+
+    println!(" ---------- QUERIES --------- ");
+    for query in queries {
+        println!(
+            "SQL:{}\nResult:\nInput Fields:\n{:#?}\nOutput Fields:\n{:#?}",
+            query.statement, query.input_fields, query.output_fields
+        );
+    }
+    println!("");
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SchemaParseResult {
+    table_fields: HashMap<String, HashMap<String, String>>,
+}
+
+#[derive(Debug)]
+struct SchemaParseError {
+    parser_error: ParserError,
+    debug: Option<String>,
+}
+
+impl SchemaParseError {
+    fn from_parser_error(
+        schema_file_contents: &str,
+        parser_error: &ParserError,
+    ) -> SchemaParseError {
+        let debug = if let ParserError::ParserError(msg) = &parser_error {
+            let line_number = extract_line_number_from_parse_error(&msg);
+
+            Some(extract_debug_block_with_line_number_range(
+                schema_file_contents,
+                line_number - 2,
+                line_number + 2,
+            ))
+        } else {
+            None
+        };
+
+        SchemaParseError {
+            parser_error: parser_error.clone(),
+            debug,
+        }
+    }
+}
+
+impl std::fmt::Display for SchemaParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(debug) = &self.debug {
+            f.write_fmt(format_args!(
+                "Failed to parse schema file: {}\n{}",
+                self.parser_error, debug
+            ))
+        } else {
+            f.write_fmt(format_args!(
+                "Failed to parse schema file: {}",
+                self.parser_error,
+            ))
+        }
+    }
+}
+
+fn parse_schema_file(
+    schema_file_contents: &str,
+    parser_dialect: &dyn dialect::Dialect,
+) -> Result<SchemaParseResult, SchemaParseError> {
+    match SQLParser::parse_sql(parser_dialect, schema_file_contents) {
+        Err(err) => Err(SchemaParseError::from_parser_error(
+            schema_file_contents,
+            &err,
+        )),
         Ok(ast) => {
+            let mut tables: HashMap<String, HashMap<String, String>> = HashMap::new();
+
             for statement in ast {
                 match statement {
                     Statement::CreateTable(create_table) => {
@@ -172,110 +294,242 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            println!("{:#?}", tables);
+            Ok(SchemaParseResult {
+                table_fields: tables,
+            })
         }
     }
+}
 
-    for query_file_path in fs::read_dir(queries_dir_path)? {
-        match query_file_path {
-            Ok(dir_entry) => {
-                println!("Reading {}", dir_entry.path().display());
+#[derive(Debug)]
+struct QueryInputField {
+    name: String,
+    data_type: String,
+}
 
-                let sql = fs::read_to_string(dir_entry.path())?;
+#[derive(Debug)]
+enum QueryOutputFieldSource {
+    TableField {
+        database: Option<String>,
+        schema: Option<String>,
+        table: Option<String>,
+        field: String,
+    },
+}
 
-                match SQLParser::parse_sql(parser_dialect, &sql) {
-                    Err(err) => match err {
-                        ParserError::ParserError(msg) => {
-                            let line_number = extract_line_number_from_parse_error(&msg);
+#[derive(Debug)]
+struct QueryOutputField {
+    source: QueryOutputFieldSource,
+    name: String,
+}
 
-                            println!("{}", print_block(&sql, line_number - 2, line_number + 2));
+#[derive(Debug)]
+struct QueryParseResult {
+    statement: Statement,
+    input_fields: Vec<QueryInputField>,
+    output_fields: Vec<QueryOutputField>,
+}
 
-                            eprintln!("parser error: {}", msg)
-                        }
-                        ParserError::TokenizerError(msg) => {
-                            eprintln!("tokenizer error: {}", msg)
-                        }
-                        ParserError::RecursionLimitExceeded => {
-                            eprintln!("recursion limit exceeded")
-                        }
-                    },
-                    Ok(ast) => {
-                        for statement in ast {
-                            match statement {
-                                Statement::Query(query) => {
-                                    let select = query.body.as_select().unwrap();
+#[derive(Debug)]
+struct QueryParseError {
+    parser_error: ParserError,
+    debug: Option<String>,
+}
 
-                                    for (i, entry) in select.projection.iter().enumerate() {
-                                        println!("SELECT ITEM {}: {}", i, entry.to_string());
-                                    }
+impl QueryParseError {
+    fn from_parser_error(query_file_contents: &str, parser_error: &ParserError) -> QueryParseError {
+        let debug = if let ParserError::ParserError(msg) = &parser_error {
+            let line_number = extract_line_number_from_parse_error(&msg);
 
-                                    if select.from.len() > 1 {
-                                        eprintln!("Unsupported SELECT query has more than one FROM clause: {}", query);
-                                    } else {
-                                        let from = select.from.first().unwrap().clone();
+            Some(extract_debug_block_with_line_number_range(
+                query_file_contents,
+                line_number - 2,
+                line_number + 2,
+            ))
+        } else {
+            None
+        };
 
-                                        match from.relation {
-                                            TableFactor::Table {
-                                                name,
-                                                alias,
-                                                args,
-                                                with_hints,
-                                                version,
-                                                with_ordinality,
-                                                partitions,
-                                                json_path,
-                                                sample,
-                                                index_hints,
-                                            } => {
-                                                let alias_name = if let Some(alias) = &alias {
-                                                    alias.name.to_string()
-                                                } else {
-                                                    name.to_string()
-                                                };
+        QueryParseError {
+            parser_error: parser_error.clone(),
+            debug,
+        }
+    }
+}
 
-                                                println!(
-                                                    "FROM TABLE {} (alias: {})",
-                                                    name, alias_name
-                                                );
-                                            }
-                                            x => {
-                                                eprintln!("NOT SUPPORTED {}", x);
-                                            }
-                                        }
-                                    }
-                                }
-                                Statement::Insert(query) => {
-                                    let insert = query.source.unwrap();
+impl std::fmt::Display for QueryParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(debug) = &self.debug {
+            f.write_fmt(format_args!(
+                "Failed to parse schema file: {}\n{}",
+                self.parser_error, debug
+            ))
+        } else {
+            f.write_fmt(format_args!(
+                "Failed to parse schema file: {}",
+                self.parser_error,
+            ))
+        }
+    }
+}
 
-                                    // println!("INSERT {:#?}", insert);
-                                }
-                                Statement::Update {
-                                    table,
-                                    assignments,
-                                    from,
-                                    selection,
-                                    returning,
-                                    or,
-                                    limit,
-                                } => {
-                                    // println!("UPDATE {:#?}", table);
-                                }
-                                Statement::Delete(query) => {
-                                    let delete = query.tables;
+fn parse_query_file(
+    query_file_contents: &str,
+    parser_dialect: &dyn dialect::Dialect,
+) -> Result<Vec<QueryParseResult>, QueryParseError> {
+    match SQLParser::parse_sql(parser_dialect, query_file_contents) {
+        Err(err) => Err(QueryParseError::from_parser_error(
+            query_file_contents,
+            &err,
+        )),
+        Ok(ast) => {
+            let mut results: Vec<QueryParseResult> = Vec::new();
 
-                                    // println!("DELETE {:#?}", delete);
-                                }
-                                _ => {}
+            for statement in &ast {
+                let input_fields: Vec<QueryInputField> = Vec::new();
+                let mut output_fields: Vec<QueryOutputField> = Vec::new();
+                let debug_statement = statement.clone();
+
+                match statement {
+                    Statement::Query(query) => {
+                        let select = query.body.as_select().unwrap();
+
+                        let mut aliases: HashMap<String, String> = HashMap::new();
+
+                        for table_with_joins in &select.from {
+                            aliases
+                                .extend(extract_aliases_using_relation(&table_with_joins.relation));
+
+                            for join in &table_with_joins.joins {
+                                aliases.extend(extract_aliases_using_relation(&join.relation));
                             }
                         }
+
+                        for (i, entry) in select.projection.iter().enumerate() {
+                            output_fields
+                                .extend(extract_output_fields_from_select_item(entry, &aliases))
+                        }
                     }
+                    Statement::Insert(query) => {}
+                    Statement::Update {
+                        table,
+                        assignments,
+                        from,
+                        selection,
+                        returning,
+                        or,
+                        limit,
+                    } => {}
+                    Statement::Delete(query) => {}
+                    _ => {}
                 }
+
+                let result = QueryParseResult {
+                    statement: statement.clone(),
+                    input_fields,
+                    output_fields,
+                };
+
+                results.push(result)
             }
-            Err(e) => {
-                eprintln!("{}", e);
-            }
+
+            Ok(results)
+        }
+    }
+}
+
+fn extract_aliases_using_relation(table_factor: &TableFactor) -> HashMap<String, String> {
+    let mut aliases: HashMap<String, String> = HashMap::new();
+
+    match table_factor {
+        TableFactor::Table { name, alias, .. } => {
+            let table_name = name.to_string();
+
+            if let Some(alias) = &alias {
+                aliases.insert(alias.name.to_string(), table_name.clone());
+            };
+        }
+        x => {
+            eprintln!("Unsupported: cannot extract aliases from {:?}", x)
         }
     }
 
-    Ok(())
+    aliases
+}
+
+fn extract_output_fields_from_select_item(
+    select_item: &SelectItem,
+    aliases: &HashMap<String, String>,
+) -> Vec<QueryOutputField> {
+    let mut output_fields: Vec<QueryOutputField> = Vec::new();
+
+    match select_item {
+        SelectItem::UnnamedExpr(expr) => match expr {
+            Expr::Identifier(ident) => output_fields.push(QueryOutputField {
+                source: QueryOutputFieldSource::TableField {
+                    database: None,
+                    schema: None,
+                    table: None,
+                    field: ident.to_string(),
+                },
+                name: ident.to_string(),
+            }),
+            Expr::CompoundIdentifier(idents) => match &idents[..] {
+                [alias_or_table, field] => {
+                    let mut table = alias_or_table.to_string();
+
+                    if let Some(aliased_table) = aliases.get(&table) {
+                        table = aliased_table.clone();
+                    }
+
+                    output_fields.push(QueryOutputField {
+                        source: QueryOutputFieldSource::TableField {
+                            database: None,
+                            schema: None,
+                            table: Some(table.to_string()),
+                            field: field.to_string(),
+                        },
+                        name: field.to_string(),
+                    });
+                }
+                [database_or_schema, table, field] => {
+                    output_fields.push(QueryOutputField {
+                        source: QueryOutputFieldSource::TableField {
+                            database: None,
+                            schema: Some(database_or_schema.to_string()),
+                            table: Some(table.to_string()),
+                            field: field.to_string(),
+                        },
+                        name: field.to_string(),
+                    });
+                }
+                [database, schema, table, field] => {
+                    output_fields.push(QueryOutputField {
+                        source: QueryOutputFieldSource::TableField {
+                            database: Some(database.to_string()),
+                            schema: Some(schema.to_string()),
+                            table: Some(table.to_string()),
+                            field: field.to_string(),
+                        },
+                        name: field.to_string(),
+                    });
+                }
+                _ => {
+                    eprintln!(
+                        "unsupported compound ident ({}): {:?}",
+                        idents.len(),
+                        idents
+                    );
+                }
+            },
+            x => {
+                eprintln!("SELECT expression not supported: {:#?}", x);
+            }
+        },
+        SelectItem::ExprWithAlias { expr, alias } => {}
+        SelectItem::QualifiedWildcard(kind, options) => {}
+        SelectItem::Wildcard(options) => {}
+    }
+
+    output_fields
 }
