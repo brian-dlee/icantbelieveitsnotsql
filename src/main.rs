@@ -174,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(contents) => contents,
                 };
 
-                match parse_query_file(&sql, parser_dialect) {
+                match parse_query_file(&sql, parser_dialect, &schema) {
                     Err(err) => {
                         eprintln!(
                             "Failed to parser query file \"{}\": {}",
@@ -217,6 +217,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Debug)]
 struct SchemaParseResult {
     table_fields: HashMap<String, HashMap<String, String>>,
+}
+
+impl SchemaParseResult {
+    fn resolve_fields_by_name(&self, name: &str) -> Vec<(String, String, String)> {
+        let mut result: Vec<(String, String, String)> = Vec::new();
+
+        for (table_name, table_fields) in &self.table_fields {
+            for (field_name, field_data_type) in table_fields {
+                if name == field_name {
+                    result.push((
+                        table_name.clone(),
+                        field_name.clone(),
+                        field_data_type.clone(),
+                    ))
+                }
+            }
+        }
+
+        return result;
+    }
 }
 
 #[derive(Debug)]
@@ -308,13 +328,11 @@ struct QueryInputField {
 }
 
 #[derive(Debug)]
-enum QueryOutputFieldSource {
-    TableField {
-        database: Option<String>,
-        schema: Option<String>,
-        table: Option<String>,
-        field: String,
-    },
+struct QueryOutputFieldSource {
+    database: Option<String>,
+    schema: Option<String>,
+    table: Option<String>,
+    field: String,
 }
 
 #[derive(Debug)]
@@ -376,6 +394,7 @@ impl std::fmt::Display for QueryParseError {
 fn parse_query_file(
     query_file_contents: &str,
     parser_dialect: &dyn dialect::Dialect,
+    schema: &SchemaParseResult,
 ) -> Result<Vec<QueryParseResult>, QueryParseError> {
     match SQLParser::parse_sql(parser_dialect, query_file_contents) {
         Err(err) => Err(QueryParseError::from_parser_error(
@@ -405,9 +424,38 @@ fn parse_query_file(
                             }
                         }
 
-                        for (i, entry) in select.projection.iter().enumerate() {
+                        for entry in select.projection.iter() {
                             output_fields
                                 .extend(extract_output_fields_from_select_item(entry, &aliases))
+                        }
+
+                        for output_field in output_fields.iter_mut() {
+                            if output_field.source.table.is_none() {
+                                let resolved_fields =
+                                    schema.resolve_fields_by_name(&output_field.source.field);
+
+                                if resolved_fields.len() == 0 {
+                                    // todo: print error
+                                    eprintln!(
+                                        "unable to resolve field to schema field: {}",
+                                        &output_field.source.field
+                                    )
+                                } else if resolved_fields.len() > 1 {
+                                    // todo: print error
+                                    eprintln!(
+                                        "ambiguous field referenced without qualifier: {}",
+                                        &output_field.source.field
+                                    )
+                                } else {
+                                    let (table, field_name, field_data_type) =
+                                        resolved_fields.first().unwrap();
+
+                                    output_field.source.table = Some(table.clone());
+                                    output_field.source.field = field_name.clone();
+                                }
+
+                                // output_field.source.table
+                            }
                         }
                     }
                     Statement::Insert(query) => {}
@@ -457,6 +505,74 @@ fn extract_aliases_using_relation(table_factor: &TableFactor) -> HashMap<String,
     aliases
 }
 
+fn extract_output_field_from_expr(
+    expr: &Expr,
+    aliases: &HashMap<String, String>,
+) -> Option<QueryOutputField> {
+    match expr {
+        Expr::Identifier(ident) => Some(QueryOutputField {
+            source: QueryOutputFieldSource {
+                database: None,
+                schema: None,
+                table: None,
+                field: ident.to_string(),
+            },
+            name: ident.to_string(),
+        }),
+        Expr::CompoundIdentifier(idents) => match &idents[..] {
+            [alias_or_table, field] => {
+                let mut table = alias_or_table.to_string();
+
+                if let Some(aliased_table) = aliases.get(&table) {
+                    table = aliased_table.clone();
+                }
+
+                Some(QueryOutputField {
+                    source: QueryOutputFieldSource {
+                        database: None,
+                        schema: None,
+                        table: Some(table.to_string()),
+                        field: field.to_string(),
+                    },
+                    name: field.to_string(),
+                })
+            }
+            [database_or_schema, table, field] => Some(QueryOutputField {
+                source: QueryOutputFieldSource {
+                    database: None,
+                    schema: Some(database_or_schema.to_string()),
+                    table: Some(table.to_string()),
+                    field: field.to_string(),
+                },
+                name: field.to_string(),
+            }),
+            [database, schema, table, field] => Some(QueryOutputField {
+                source: QueryOutputFieldSource {
+                    database: Some(database.to_string()),
+                    schema: Some(schema.to_string()),
+                    table: Some(table.to_string()),
+                    field: field.to_string(),
+                },
+                name: field.to_string(),
+            }),
+            _ => {
+                eprintln!(
+                    "unsupported compound ident ({}): {:?}",
+                    idents.len(),
+                    idents
+                );
+
+                None
+            }
+        },
+        x => {
+            eprintln!("SELECT expression not supported: {:#?}", x);
+
+            None
+        }
+    }
+}
+
 fn extract_output_fields_from_select_item(
     select_item: &SelectItem,
     aliases: &HashMap<String, String>,
@@ -464,71 +580,29 @@ fn extract_output_fields_from_select_item(
     let mut output_fields: Vec<QueryOutputField> = Vec::new();
 
     match select_item {
-        SelectItem::UnnamedExpr(expr) => match expr {
-            Expr::Identifier(ident) => output_fields.push(QueryOutputField {
-                source: QueryOutputFieldSource::TableField {
-                    database: None,
-                    schema: None,
-                    table: None,
-                    field: ident.to_string(),
-                },
-                name: ident.to_string(),
-            }),
-            Expr::CompoundIdentifier(idents) => match &idents[..] {
-                [alias_or_table, field] => {
-                    let mut table = alias_or_table.to_string();
-
-                    if let Some(aliased_table) = aliases.get(&table) {
-                        table = aliased_table.clone();
-                    }
-
-                    output_fields.push(QueryOutputField {
-                        source: QueryOutputFieldSource::TableField {
-                            database: None,
-                            schema: None,
-                            table: Some(table.to_string()),
-                            field: field.to_string(),
-                        },
-                        name: field.to_string(),
-                    });
-                }
-                [database_or_schema, table, field] => {
-                    output_fields.push(QueryOutputField {
-                        source: QueryOutputFieldSource::TableField {
-                            database: None,
-                            schema: Some(database_or_schema.to_string()),
-                            table: Some(table.to_string()),
-                            field: field.to_string(),
-                        },
-                        name: field.to_string(),
-                    });
-                }
-                [database, schema, table, field] => {
-                    output_fields.push(QueryOutputField {
-                        source: QueryOutputFieldSource::TableField {
-                            database: Some(database.to_string()),
-                            schema: Some(schema.to_string()),
-                            table: Some(table.to_string()),
-                            field: field.to_string(),
-                        },
-                        name: field.to_string(),
-                    });
-                }
-                _ => {
-                    eprintln!(
-                        "unsupported compound ident ({}): {:?}",
-                        idents.len(),
-                        idents
-                    );
-                }
-            },
-            x => {
-                eprintln!("SELECT expression not supported: {:#?}", x);
+        SelectItem::UnnamedExpr(expr) => {
+            if let Some(output_field) = extract_output_field_from_expr(expr, aliases) {
+                output_fields.push(output_field)
             }
-        },
-        SelectItem::ExprWithAlias { expr, alias } => {}
-        SelectItem::QualifiedWildcard(kind, options) => {}
-        SelectItem::Wildcard(options) => {}
+        }
+        SelectItem::ExprWithAlias { expr, alias } => {
+            if let Some(mut output_field) = extract_output_field_from_expr(expr, aliases) {
+                output_field.name = alias.to_string();
+                output_fields.push(output_field)
+            }
+        }
+        SelectItem::QualifiedWildcard(..) => {
+            eprintln!(
+                "SELECT expression not supported: don't use wildcards. {:#?}",
+                select_item
+            );
+        }
+        SelectItem::Wildcard(..) => {
+            eprintln!(
+                "SELECT expression not supported: don't use wildcards. {:#?}",
+                select_item
+            );
+        }
     }
 
     output_fields
