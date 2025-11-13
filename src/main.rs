@@ -140,6 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 schema_file_path.display(),
                 err
             );
+
             std::process::exit(1);
         }
         Ok(contents) => contents,
@@ -152,6 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 schema_file_path.display(),
                 err
             );
+
             std::process::exit(1);
         }
         Ok(result) => result,
@@ -174,19 +176,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(contents) => contents,
                 };
 
-                match parse_query_file(&sql, parser_dialect, &schema) {
+                match SQLParser::parse_sql(parser_dialect, &sql) {
                     Err(err) => {
                         eprintln!(
-                            "Failed to parser query file \"{}\": {}",
+                            "Failed to parse query file \"{}\": {}",
                             path.display(),
-                            err
+                            format_sql_parser_error(&err, &sql)
                         );
+
                         continue;
                     }
-                    Ok(result) => {
-                        queries.extend(result);
+
+                    Ok(ast) => {
+                        for statement in ast {
+                            match process_sql_statement(&statement, &schema) {
+                                Ok(result) => {
+                                    queries.push(result);
+                                }
+                                Err(err) => {
+                                    eprintln!(
+                                        "Failed to parser query file \"{}\": {}",
+                                        path.display(),
+                                        err.format(&statement, &sql),
+                                    );
+                                }
+                            }
+                        }
                     }
-                };
+                }
             }
             Err(err) => {
                 eprintln!(
@@ -220,17 +237,19 @@ struct SchemaParseResult {
 }
 
 impl SchemaParseResult {
-    fn resolve_fields_by_name(&self, name: &str) -> Vec<(String, String, String)> {
-        let mut result: Vec<(String, String, String)> = Vec::new();
+    fn resolve_fields_by_name(&self, name: &str) -> Vec<FieldSource> {
+        let mut result: Vec<FieldSource> = Vec::new();
 
         for (table_name, table_fields) in &self.table_fields {
             for (field_name, field_data_type) in table_fields {
                 if name == field_name {
-                    result.push((
-                        table_name.clone(),
-                        field_name.clone(),
-                        field_data_type.clone(),
-                    ))
+                    result.push(FieldSource::TableSource {
+                        database: None,
+                        schema: None,
+                        table: table_name.clone(),
+                        column: field_name.clone(),
+                        data_type: field_data_type.clone(),
+                    })
                 }
             }
         }
@@ -239,61 +258,12 @@ impl SchemaParseResult {
     }
 }
 
-#[derive(Debug)]
-struct SchemaParseError {
-    parser_error: ParserError,
-    debug: Option<String>,
-}
-
-impl SchemaParseError {
-    fn from_parser_error(
-        schema_file_contents: &str,
-        parser_error: &ParserError,
-    ) -> SchemaParseError {
-        let debug = if let ParserError::ParserError(msg) = &parser_error {
-            let line_number = extract_line_number_from_parse_error(&msg);
-
-            Some(extract_debug_block_with_line_number_range(
-                schema_file_contents,
-                line_number - 2,
-                line_number + 2,
-            ))
-        } else {
-            None
-        };
-
-        SchemaParseError {
-            parser_error: parser_error.clone(),
-            debug,
-        }
-    }
-}
-
-impl std::fmt::Display for SchemaParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(debug) = &self.debug {
-            f.write_fmt(format_args!(
-                "Failed to parse schema file: {}\n{}",
-                self.parser_error, debug
-            ))
-        } else {
-            f.write_fmt(format_args!(
-                "Failed to parse schema file: {}",
-                self.parser_error,
-            ))
-        }
-    }
-}
-
 fn parse_schema_file(
     schema_file_contents: &str,
     parser_dialect: &dyn dialect::Dialect,
-) -> Result<SchemaParseResult, SchemaParseError> {
+) -> Result<SchemaParseResult, ParserError> {
     match SQLParser::parse_sql(parser_dialect, schema_file_contents) {
-        Err(err) => Err(SchemaParseError::from_parser_error(
-            schema_file_contents,
-            &err,
-        )),
+        Err(err) => Err(err),
         Ok(ast) => {
             let mut tables: HashMap<String, HashMap<String, String>> = HashMap::new();
 
@@ -348,142 +318,133 @@ struct QueryParseResult {
     output_fields: Vec<QueryOutputField>,
 }
 
+fn format_sql_parser_error(error: &ParserError, sql: &str) -> String {
+    if let ParserError::ParserError(msg) = &error {
+        let line_number = extract_line_number_from_parse_error(&msg);
+        let debug =
+            extract_debug_block_with_line_number_range(sql, line_number - 2, line_number + 2);
+
+        format!("{}: {}", error, debug)
+    } else {
+        error.to_string()
+    }
+}
+
 #[derive(Debug)]
-struct QueryParseError {
-    parser_error: ParserError,
-    debug: Option<String>,
+enum FieldDataType {
+    Boolean,
+    Float,
+    Integer,
+    String,
+    Object(String),
 }
 
-impl QueryParseError {
-    fn from_parser_error(query_file_contents: &str, parser_error: &ParserError) -> QueryParseError {
-        let debug = if let ParserError::ParserError(msg) = &parser_error {
-            let line_number = extract_line_number_from_parse_error(&msg);
+#[derive(Clone, Debug)]
+enum FieldSource {
+    TableSource {
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        column: String,
+        data_type: String,
+    },
+}
 
-            Some(extract_debug_block_with_line_number_range(
-                query_file_contents,
-                line_number - 2,
-                line_number + 2,
-            ))
-        } else {
-            None
-        };
+#[derive(Debug)]
+enum QueryError {
+    AmbiguousFieldReference {
+        field_name: String,
+        candidates: Vec<FieldSource>,
+    },
+    InvalidFieldReference {
+        field_name: String,
+    },
+}
 
-        QueryParseError {
-            parser_error: parser_error.clone(),
-            debug,
-        }
+impl QueryError {
+    fn format(&self, statement: &Statement, sql: &str) -> String {
+        String::from("")
     }
 }
 
-impl std::fmt::Display for QueryParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(debug) = &self.debug {
-            f.write_fmt(format_args!(
-                "Failed to parse schema file: {}\n{}",
-                self.parser_error, debug
-            ))
-        } else {
-            f.write_fmt(format_args!(
-                "Failed to parse schema file: {}",
-                self.parser_error,
-            ))
-        }
-    }
-}
-
-fn parse_query_file(
-    query_file_contents: &str,
-    parser_dialect: &dyn dialect::Dialect,
+fn process_sql_statement(
+    statement: &Statement,
     schema: &SchemaParseResult,
-) -> Result<Vec<QueryParseResult>, QueryParseError> {
-    match SQLParser::parse_sql(parser_dialect, query_file_contents) {
-        Err(err) => Err(QueryParseError::from_parser_error(
-            query_file_contents,
-            &err,
-        )),
-        Ok(ast) => {
-            let mut results: Vec<QueryParseResult> = Vec::new();
+) -> Result<QueryParseResult, QueryError> {
+    let input_fields: Vec<QueryInputField> = Vec::new();
+    let mut output_fields: Vec<QueryOutputField> = Vec::new();
 
-            for statement in &ast {
-                let input_fields: Vec<QueryInputField> = Vec::new();
-                let mut output_fields: Vec<QueryOutputField> = Vec::new();
-                let debug_statement = statement.clone();
+    match statement {
+        Statement::Query(query) => {
+            let select = query.body.as_select().unwrap();
 
-                match statement {
-                    Statement::Query(query) => {
-                        let select = query.body.as_select().unwrap();
+            let mut aliases: HashMap<String, String> = HashMap::new();
 
-                        let mut aliases: HashMap<String, String> = HashMap::new();
+            for table_with_joins in &select.from {
+                aliases.extend(extract_aliases_using_relation(&table_with_joins.relation));
 
-                        for table_with_joins in &select.from {
-                            aliases
-                                .extend(extract_aliases_using_relation(&table_with_joins.relation));
+                for join in &table_with_joins.joins {
+                    aliases.extend(extract_aliases_using_relation(&join.relation));
+                }
+            }
 
-                            for join in &table_with_joins.joins {
-                                aliases.extend(extract_aliases_using_relation(&join.relation));
-                            }
-                        }
+            for entry in select.projection.iter() {
+                output_fields.extend(extract_output_fields_from_select_item(entry, &aliases))
+            }
 
-                        for entry in select.projection.iter() {
-                            output_fields
-                                .extend(extract_output_fields_from_select_item(entry, &aliases))
-                        }
+            for output_field in output_fields.iter_mut() {
+                if output_field.source.table.is_none() {
+                    let resolved_fields = schema.resolve_fields_by_name(&output_field.source.field);
 
-                        for output_field in output_fields.iter_mut() {
-                            if output_field.source.table.is_none() {
-                                let resolved_fields =
-                                    schema.resolve_fields_by_name(&output_field.source.field);
-
-                                if resolved_fields.len() == 0 {
-                                    // todo: print error
-                                    eprintln!(
-                                        "unable to resolve field to schema field: {}",
-                                        &output_field.source.field
-                                    )
-                                } else if resolved_fields.len() > 1 {
-                                    // todo: print error
-                                    eprintln!(
-                                        "ambiguous field referenced without qualifier: {}",
-                                        &output_field.source.field
-                                    )
-                                } else {
-                                    let (table, field_name, field_data_type) =
-                                        resolved_fields.first().unwrap();
-
-                                    output_field.source.table = Some(table.clone());
-                                    output_field.source.field = field_name.clone();
-                                }
-
-                                // output_field.source.table
+                    if resolved_fields.len() == 0 {
+                        return Err(QueryError::InvalidFieldReference {
+                            field_name: output_field.source.field.clone(),
+                        });
+                    } else if resolved_fields.len() > 1 {
+                        return Err(QueryError::AmbiguousFieldReference {
+                            field_name: output_field.source.field.clone(),
+                            candidates: resolved_fields.clone(),
+                        });
+                    } else {
+                        match resolved_fields.first().unwrap() {
+                            FieldSource::TableSource {
+                                database,
+                                schema,
+                                table,
+                                column,
+                                data_type: _,
+                            } => {
+                                output_field.source.database = database.clone();
+                                output_field.source.schema = schema.clone();
+                                output_field.source.table = Some(table.clone());
+                                output_field.source.field = column.clone();
                             }
                         }
                     }
-                    Statement::Insert(query) => {}
-                    Statement::Update {
-                        table,
-                        assignments,
-                        from,
-                        selection,
-                        returning,
-                        or,
-                        limit,
-                    } => {}
-                    Statement::Delete(query) => {}
-                    _ => {}
+
+                    // output_field.source.table
                 }
-
-                let result = QueryParseResult {
-                    statement: statement.clone(),
-                    input_fields,
-                    output_fields,
-                };
-
-                results.push(result)
             }
-
-            Ok(results)
         }
-    }
+        Statement::Insert(query) => {}
+        Statement::Update {
+            table,
+            assignments,
+            from,
+            selection,
+            returning,
+            or,
+            limit,
+        } => {}
+        Statement::Delete(query) => {}
+        _ => {}
+    };
+
+    Ok(QueryParseResult {
+        statement: statement.clone(),
+        input_fields,
+        output_fields,
+    })
 }
 
 fn extract_aliases_using_relation(table_factor: &TableFactor) -> HashMap<String, String> {
