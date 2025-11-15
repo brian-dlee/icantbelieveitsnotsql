@@ -18,7 +18,7 @@ VALUES (?, ?, ?);
 -- UPDATE
 UPDATE users
 SET email = ?
-WHERE id = ?;
+WHERE id = :id;
 
 UPDATE accounts
 SET balance = balance + ?

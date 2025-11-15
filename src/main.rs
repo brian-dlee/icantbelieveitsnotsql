@@ -195,9 +195,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 Err(err) => {
                                     eprintln!(
-                                        "Failed to parser query file \"{}\": {}",
+                                        "Failed to process SQL statement \"{}\": {:?}",
                                         path.display(),
-                                        err.format(&statement, &sql),
+                                        err,
                                     );
                                 }
                             }
@@ -330,15 +330,6 @@ fn format_sql_parser_error(error: &ParserError, sql: &str) -> String {
     }
 }
 
-#[derive(Debug)]
-enum FieldDataType {
-    Boolean,
-    Float,
-    Integer,
-    String,
-    Object(String),
-}
-
 #[derive(Clone, Debug)]
 enum FieldSource {
     TableSource {
@@ -390,6 +381,17 @@ fn process_sql_statement(
 
             for entry in select.projection.iter() {
                 output_fields.extend(extract_output_fields_from_select_item(entry, &aliases))
+            }
+
+            if let Some(expr) = &select.selection {
+                match expr {
+                    Expr::BinaryOp { left, op, right } => {
+                        println!("binary op: {} {} {}", left, op, right);
+                    }
+                    _ => {
+                        println!("where expr: {}", expr.clone());
+                    }
+                }
             }
 
             for output_field in output_fields.iter_mut() {
