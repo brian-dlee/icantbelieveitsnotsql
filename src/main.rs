@@ -437,6 +437,9 @@ struct GenerateConfig {
 
     #[serde(rename = "schema-file")]
     schema_file: Option<PathBuf>,
+
+    #[serde(rename = "output-dir")]
+    output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -480,6 +483,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .queries_dir
             .unwrap_or(PathBuf::from("queries")),
     );
+
+    let output_dir_path = project_path.join(
+        config
+            .generate
+            .output_dir
+            .unwrap_or(PathBuf::from("generated")),
+    );
+
+    println!("Output directory: {}", output_dir_path.display());
+
+    if let Err(err) = fs::create_dir_all(&output_dir_path) {
+        eprintln!(
+            "Failed to create output directory \"{}\": {}",
+            output_dir_path.display(),
+            err
+        );
+        std::process::exit(1);
+    }
 
     println!("Reading schema file: {}", schema_file_path.display());
 
