@@ -1,6 +1,6 @@
 use clap::Parser;
 use serde::Deserialize;
-use sqlparser::ast::{Expr, SelectItem, Statement, TableFactor};
+use sqlparser::ast::{Expr, FromTable, SelectItem, SetExpr, Statement, TableFactor, Value};
 use sqlparser::dialect;
 use sqlparser::parser::{Parser as SQLParser, ParserError};
 use std::collections::HashMap;
@@ -68,10 +68,13 @@ fn extract_query_annotations(sql: &str) -> Vec<Option<QueryAnnotation>> {
 
                 if let (Some(cardinality), true) = (cardinality, !name.is_empty()) {
                     // Warn if the name isn't a valid Python identifier
-                    let valid_python_ident = name
-                        .chars()
-                        .enumerate()
-                        .all(|(i, c)| if i == 0 { c.is_alphabetic() || c == '_' } else { c.is_alphanumeric() || c == '_' });
+                    let valid_python_ident = name.chars().enumerate().all(|(i, c)| {
+                        if i == 0 {
+                            c.is_alphabetic() || c == '_'
+                        } else {
+                            c.is_alphanumeric() || c == '_'
+                        }
+                    });
 
                     if !valid_python_ident {
                         eprintln!(
@@ -112,6 +115,248 @@ fn extract_query_annotations(sql: &str) -> Vec<Option<QueryAnnotation>> {
     }
 
     annotations
+}
+
+/// Recursively walk an expression tree and collect all placeholder strings
+/// (`:name`, `$1`, `?`) into `out`, preserving order of first appearance.
+fn collect_placeholders(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Value(v) => {
+            if let Value::Placeholder(name) = &v.value {
+                out.push(name.clone());
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_placeholders(left, out);
+            collect_placeholders(right, out);
+        }
+        Expr::UnaryOp { expr, .. } => collect_placeholders(expr, out),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            collect_placeholders(expr, out);
+            collect_placeholders(low, out);
+            collect_placeholders(high, out);
+        }
+        Expr::InList { expr, list, .. } => {
+            collect_placeholders(expr, out);
+            for e in list {
+                collect_placeholders(e, out);
+            }
+        }
+        Expr::IsNull(e) | Expr::IsNotNull(e) => collect_placeholders(e, out),
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. } => {
+            collect_placeholders(expr, out);
+            collect_placeholders(pattern, out);
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            if let Some(op) = operand {
+                collect_placeholders(op, out);
+            }
+            for condition in conditions {
+                collect_placeholders(&condition.condition, out);
+                collect_placeholders(&condition.result, out);
+            }
+            if let Some(e) = else_result {
+                collect_placeholders(e, out);
+            }
+        }
+        Expr::Function(f) => {
+            if let sqlparser::ast::FunctionArguments::List(arg_list) = &f.args {
+                for arg in &arg_list.args {
+                    match arg {
+                        sqlparser::ast::FunctionArg::Named { arg, .. }
+                        | sqlparser::ast::FunctionArg::Unnamed(arg) => {
+                            if let sqlparser::ast::FunctionArgExpr::Expr(e) = arg {
+                                collect_placeholders(e, out);
+                            }
+                        }
+                        sqlparser::ast::FunctionArg::ExprNamed { arg, .. } => {
+                            if let sqlparser::ast::FunctionArgExpr::Expr(e) = arg {
+                                collect_placeholders(e, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Given a list of raw placeholder strings, a set of table names active in the
+/// query, and the schema, build a deduplicated list of `QueryInputField`s with
+/// best-effort type inference.
+///
+/// For `:name`-style params, the name has the leading `:` stripped.
+/// For `$1`-style params, the name is kept as `$1`.
+/// For `?` anonymous params, they are named `p1`, `p2`, … in order.
+fn build_input_fields(
+    raw: &[String],
+    active_tables: &[&str],
+    schema: &SchemaParseResult,
+) -> Vec<QueryInputField> {
+    let mut seen: Vec<String> = Vec::new(); // tracks canonical names for dedup
+    let mut fields: Vec<QueryInputField> = Vec::new();
+    let mut anon_counter = 0usize;
+
+    for placeholder in raw {
+        if placeholder == "?" {
+            anon_counter += 1;
+            let name = format!("p{}", anon_counter);
+            if !seen.contains(&name) {
+                seen.push(name.clone());
+                fields.push(QueryInputField {
+                    name,
+                    data_type: "Any".to_string(),
+                });
+            }
+        } else if let Some(name) = placeholder.strip_prefix(':') {
+            // :name style — named parameter
+            if !seen.contains(&name.to_string()) {
+                seen.push(name.to_string());
+                // Try to resolve type from schema by looking for a column with
+                // this name in the active tables.
+                let data_type = resolve_param_type(name, active_tables, schema);
+                fields.push(QueryInputField {
+                    name: name.to_string(),
+                    data_type,
+                });
+            }
+        } else if placeholder.starts_with('$') {
+            // $1 positional style
+            if !seen.contains(placeholder) {
+                seen.push(placeholder.clone());
+                fields.push(QueryInputField {
+                    name: placeholder.clone(),
+                    data_type: "Any".to_string(),
+                });
+            }
+        } else {
+            // Unknown style — emit as-is
+            if !seen.contains(placeholder) {
+                seen.push(placeholder.clone());
+                fields.push(QueryInputField {
+                    name: placeholder.clone(),
+                    data_type: "Any".to_string(),
+                });
+            }
+        }
+    }
+
+    fields
+}
+
+/// Try to find the SQL type of a column named `param_name` within the given
+/// `active_tables`. Returns a Python type string or `"Any"` if not resolvable.
+fn resolve_param_type(
+    param_name: &str,
+    active_tables: &[&str],
+    schema: &SchemaParseResult,
+) -> String {
+    let mut matches: Vec<&str> = Vec::new();
+
+    for &table_name in active_tables {
+        if let Some(columns) = schema.table_fields.get(table_name) {
+            if let Some(sql_type) = columns.get(param_name) {
+                matches.push(sql_type.as_str());
+            }
+        }
+    }
+
+    if matches.len() == 1 {
+        sql_type_to_python(matches[0]).to_string()
+    } else {
+        // Ambiguous or not found — fall back to Any
+        "Any".to_string()
+    }
+}
+
+/// Map a SQL type string (as produced by sqlparser-rs `.to_string()`) to a
+/// Python type annotation string. Unknown types fall back to `"Any"`.
+fn sql_type_to_python(sql_type: &str) -> &'static str {
+    // Normalise: uppercase and strip trailing (…) precision/length specifiers.
+    let upper = sql_type.to_uppercase();
+    let normalised = if let Some(pos) = upper.find('(') {
+        upper[..pos].trim()
+    } else {
+        upper.trim()
+    };
+
+    match normalised {
+        // Integer types
+        "INTEGER" | "INT" | "INT2" | "INT4" | "INT8" | "INT16" | "INT32" | "INT64" | "BIGINT"
+        | "SMALLINT" | "TINYINT" | "MEDIUMINT" | "BYTEINT" | "HUGEINT" | "UBIGINT"
+        | "USMALLINT" | "UTINYINT" | "UINTEGER" => "int",
+
+        // Text types
+        "TEXT" | "VARCHAR" | "CHAR" | "CHARACTER VARYING" | "CHARACTER" | "CLOB" | "TINYTEXT"
+        | "MEDIUMTEXT" | "LONGTEXT" | "STRING" | "NCHAR" | "NVARCHAR" | "NCLOB" | "BPCHAR" => "str",
+
+        // Float types
+        "REAL" | "FLOAT" | "FLOAT4" | "FLOAT8" | "FLOAT16" | "FLOAT32" | "FLOAT64" | "DOUBLE"
+        | "DOUBLE PRECISION" => "float",
+
+        // Boolean types
+        "BOOLEAN" | "BOOL" => "bool",
+
+        // Blob/binary types
+        "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB"
+        | "BIT" | "BIT VARYING" => "bytes",
+
+        // Decimal/numeric types
+        "NUMERIC" | "DECIMAL" | "DEC" | "MONEY" | "SMALLMONEY" => "Decimal",
+
+        // Date types
+        "DATE" => "datetime.date",
+
+        // Time types
+        "TIME" | "TIMETZ" | "TIME WITH TIME ZONE" | "TIME WITHOUT TIME ZONE" => "datetime.time",
+
+        // Timestamp / datetime types
+        "TIMESTAMP"
+        | "TIMESTAMPTZ"
+        | "TIMESTAMP WITH TIME ZONE"
+        | "TIMESTAMP WITHOUT TIME ZONE"
+        | "DATETIME"
+        | "DATETIME2"
+        | "SMALLDATETIME"
+        | "DATETIMEOFFSET" => "datetime.datetime",
+
+        // UUID — represent as str
+        "UUID" => "str",
+
+        // JSON types — too dynamic, use Any
+        "JSON" | "JSONB" => "Any",
+
+        _ => {
+            // SQLite-style affinity fallback: match by substring
+            if normalised.contains("INT") {
+                "int"
+            } else if normalised.contains("CHAR")
+                || normalised.contains("CLOB")
+                || normalised.contains("TEXT")
+            {
+                "str"
+            } else if normalised.contains("REAL")
+                || normalised.contains("FLOA")
+                || normalised.contains("DOUB")
+            {
+                "float"
+            } else if normalised.contains("BLOB") || normalised.is_empty() {
+                "bytes"
+            } else {
+                "Any"
+            }
+        }
+    }
 }
 
 enum SQLDialect {
@@ -494,7 +739,8 @@ fn process_sql_statement(
     annotation: QueryAnnotation,
     schema: &SchemaParseResult,
 ) -> Result<QueryParseResult, QueryError> {
-    let input_fields: Vec<QueryInputField> = Vec::new();
+    let mut raw_placeholders: Vec<String> = Vec::new();
+    let mut active_tables: Vec<String> = Vec::new();
     let mut output_fields: Vec<QueryOutputField> = Vec::new();
 
     match statement {
@@ -505,9 +751,11 @@ fn process_sql_statement(
 
             for table_with_joins in &select.from {
                 aliases.extend(extract_aliases_using_relation(&table_with_joins.relation));
+                collect_table_name(&table_with_joins.relation, &mut active_tables);
 
                 for join in &table_with_joins.joins {
                     aliases.extend(extract_aliases_using_relation(&join.relation));
+                    collect_table_name(&join.relation, &mut active_tables);
                 }
             }
 
@@ -516,14 +764,7 @@ fn process_sql_statement(
             }
 
             if let Some(expr) = &select.selection {
-                match expr {
-                    Expr::BinaryOp { left, op, right } => {
-                        println!("binary op: {} {} {}", left, op, right);
-                    }
-                    _ => {
-                        println!("where expr: {}", expr.clone());
-                    }
-                }
+                collect_placeholders(expr, &mut raw_placeholders);
             }
 
             for output_field in output_fields.iter_mut() {
@@ -555,24 +796,69 @@ fn process_sql_statement(
                             }
                         }
                     }
-
-                    // output_field.source.table
                 }
             }
         }
-        Statement::Insert(query) => {}
+        Statement::Insert(insert) => {
+            // Collect the target table as an active table for type inference.
+            active_tables.push(insert.table.to_string());
+
+            // Walk all expressions in the VALUES rows.
+            if let Some(source) = &insert.source {
+                if let SetExpr::Values(values) = source.body.as_ref() {
+                    for row in &values.rows {
+                        for expr in row {
+                            collect_placeholders(expr, &mut raw_placeholders);
+                        }
+                    }
+                }
+            }
+        }
         Statement::Update {
             table,
             assignments,
-            from,
             selection,
-            returning,
-            or,
-            limit,
-        } => {}
-        Statement::Delete(query) => {}
+            ..
+        } => {
+            // Collect the target table name.
+            active_tables.push(table.to_string());
+
+            // Walk the RHS of each SET assignment.
+            for assignment in assignments {
+                collect_placeholders(&assignment.value, &mut raw_placeholders);
+
+                // Also record the column name from the LHS so type inference
+                // can match `:value` params against named columns below.
+                // (We do this implicitly via active_tables + resolve_param_type.)
+            }
+
+            // Walk the WHERE clause.
+            if let Some(expr) = selection {
+                collect_placeholders(expr, &mut raw_placeholders);
+            }
+        }
+        Statement::Delete(delete) => {
+            // Collect named table targets (DELETE t1, t2 FROM ...).
+            for table_ref in &delete.tables {
+                active_tables.push(table_ref.to_string());
+            }
+            // Collect from the FROM clause.
+            let from_tables = match &delete.from {
+                FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
+            };
+            for table_with_joins in from_tables {
+                collect_table_name(&table_with_joins.relation, &mut active_tables);
+            }
+
+            if let Some(expr) = &delete.selection {
+                collect_placeholders(expr, &mut raw_placeholders);
+            }
+        }
         _ => {}
     };
+
+    let active_table_refs: Vec<&str> = active_tables.iter().map(|s| s.as_str()).collect();
+    let input_fields = build_input_fields(&raw_placeholders, &active_table_refs, schema);
 
     Ok(QueryParseResult {
         statement: statement.clone(),
@@ -580,6 +866,17 @@ fn process_sql_statement(
         input_fields,
         output_fields,
     })
+}
+
+/// Extract the real table name from a TableFactor and push it into `out` if
+/// not already present. Used to build the active_tables list for type inference.
+fn collect_table_name(table_factor: &TableFactor, out: &mut Vec<String>) {
+    if let TableFactor::Table { name, .. } = table_factor {
+        let table_name = name.to_string();
+        if !out.contains(&table_name) {
+            out.push(table_name);
+        }
+    }
 }
 
 fn extract_aliases_using_relation(table_factor: &TableFactor) -> HashMap<String, String> {
@@ -702,4 +999,146 @@ fn extract_output_fields_from_select_item(
     }
 
     output_fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sql_type_to_python_integer() {
+        assert_eq!(sql_type_to_python("INTEGER"), "int");
+        assert_eq!(sql_type_to_python("INT"), "int");
+        assert_eq!(sql_type_to_python("BIGINT"), "int");
+        assert_eq!(sql_type_to_python("SMALLINT"), "int");
+        assert_eq!(sql_type_to_python("TINYINT"), "int");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_text() {
+        assert_eq!(sql_type_to_python("TEXT"), "str");
+        assert_eq!(sql_type_to_python("VARCHAR"), "str");
+        assert_eq!(sql_type_to_python("CHARACTER VARYING(255)"), "str");
+        assert_eq!(sql_type_to_python("CHAR(10)"), "str");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_float() {
+        assert_eq!(sql_type_to_python("REAL"), "float");
+        assert_eq!(sql_type_to_python("FLOAT"), "float");
+        assert_eq!(sql_type_to_python("DOUBLE"), "float");
+        assert_eq!(sql_type_to_python("DOUBLE PRECISION"), "float");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_bool() {
+        assert_eq!(sql_type_to_python("BOOLEAN"), "bool");
+        assert_eq!(sql_type_to_python("BOOL"), "bool");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_bytes() {
+        assert_eq!(sql_type_to_python("BLOB"), "bytes");
+        assert_eq!(sql_type_to_python("blob"), "bytes");
+        assert_eq!(sql_type_to_python("BYTEA"), "bytes");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_decimal() {
+        assert_eq!(sql_type_to_python("NUMERIC"), "Decimal");
+        assert_eq!(sql_type_to_python("DECIMAL"), "Decimal");
+        assert_eq!(sql_type_to_python("NUMERIC(10,2)"), "Decimal");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_datetime() {
+        assert_eq!(sql_type_to_python("DATE"), "datetime.date");
+        assert_eq!(sql_type_to_python("TIME"), "datetime.time");
+        assert_eq!(sql_type_to_python("TIMESTAMP"), "datetime.datetime");
+        assert_eq!(sql_type_to_python("DATETIME"), "datetime.datetime");
+        assert_eq!(sql_type_to_python("TIMESTAMPTZ"), "datetime.datetime");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_json() {
+        assert_eq!(sql_type_to_python("JSON"), "Any");
+        assert_eq!(sql_type_to_python("JSONB"), "Any");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_uuid() {
+        assert_eq!(sql_type_to_python("UUID"), "str");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_unknown_fallback() {
+        assert_eq!(sql_type_to_python("FROBNICATOR"), "Any");
+    }
+
+    #[test]
+    fn test_sql_type_to_python_sqlite_affinity_fallback() {
+        assert_eq!(sql_type_to_python("MYINTEGER"), "int");
+        assert_eq!(sql_type_to_python("LONGTEXT"), "str");
+    }
+
+    #[test]
+    fn test_collect_placeholders_named() {
+        use sqlparser::dialect::SQLiteDialect;
+        use sqlparser::parser::Parser as SQLParser;
+
+        let sql = "SELECT id FROM users WHERE id = :id AND email = :email";
+        let ast = SQLParser::parse_sql(&SQLiteDialect {}, sql).unwrap();
+        if let Statement::Query(q) = &ast[0] {
+            let select = q.body.as_select().unwrap();
+            let mut placeholders = Vec::new();
+            if let Some(expr) = &select.selection {
+                collect_placeholders(expr, &mut placeholders);
+            }
+            assert_eq!(placeholders, vec![":id", ":email"]);
+        } else {
+            panic!("expected Query");
+        }
+    }
+
+    #[test]
+    fn test_build_input_fields_named_dedup() {
+        let schema = SchemaParseResult {
+            table_fields: HashMap::new(),
+        };
+        let raw = vec![":id".to_string(), ":email".to_string(), ":id".to_string()];
+        let fields = build_input_fields(&raw, &[], &schema);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "id");
+        assert_eq!(fields[1].name, "email");
+    }
+
+    #[test]
+    fn test_build_input_fields_anon_positional() {
+        let schema = SchemaParseResult {
+            table_fields: HashMap::new(),
+        };
+        let raw = vec!["?".to_string(), "?".to_string(), "?".to_string()];
+        let fields = build_input_fields(&raw, &[], &schema);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].name, "p1");
+        assert_eq!(fields[1].name, "p2");
+        assert_eq!(fields[2].name, "p3");
+    }
+
+    #[test]
+    fn test_build_input_fields_type_inference() {
+        let mut users_cols = HashMap::new();
+        users_cols.insert("id".to_string(), "INTEGER".to_string());
+        users_cols.insert("email".to_string(), "TEXT".to_string());
+        let mut table_fields = HashMap::new();
+        table_fields.insert("users".to_string(), users_cols);
+
+        let schema = SchemaParseResult { table_fields };
+        let raw = vec![":id".to_string(), ":email".to_string()];
+        let fields = build_input_fields(&raw, &["users"], &schema);
+        assert_eq!(fields[0].name, "id");
+        assert_eq!(fields[0].data_type, "int");
+        assert_eq!(fields[1].name, "email");
+        assert_eq!(fields[1].data_type, "str");
+    }
 }
