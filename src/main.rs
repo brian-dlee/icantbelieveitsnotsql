@@ -9,6 +9,111 @@ use std::path::PathBuf;
 use thiserror;
 use toml;
 
+#[derive(Clone, Debug)]
+enum QueryCardinality {
+    One,
+    Many,
+    Exec,
+}
+
+impl std::fmt::Display for QueryCardinality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryCardinality::One => write!(f, ":one"),
+            QueryCardinality::Many => write!(f, ":many"),
+            QueryCardinality::Exec => write!(f, ":exec"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QueryAnnotation {
+    name: String,
+    cardinality: QueryCardinality,
+}
+
+fn extract_query_annotations(sql: &str) -> Vec<Option<QueryAnnotation>> {
+    let mut annotations: Vec<Option<QueryAnnotation>> = Vec::new();
+
+    // Track the most recently seen valid annotation comment
+    let mut pending_annotation: Option<QueryAnnotation> = None;
+    // Track whether we have seen any non-blank, non-comment content since the
+    // last `;` (i.e. whether we are inside a statement body)
+    let mut in_statement = false;
+
+    for line in sql.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            // Blank lines do not break the association between an annotation
+            // and the statement that follows it.
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("--") {
+            // This is a comment line. Try to parse it as an annotation.
+            let comment = rest.trim();
+            let parts: Vec<&str> = comment.splitn(2, ':').collect();
+
+            if parts.len() == 2 {
+                let name = parts[0].trim();
+                let cardinality_str = parts[1].trim();
+
+                let cardinality = match cardinality_str {
+                    "one" => Some(QueryCardinality::One),
+                    "many" => Some(QueryCardinality::Many),
+                    "exec" => Some(QueryCardinality::Exec),
+                    _ => None,
+                };
+
+                if let (Some(cardinality), true) = (cardinality, !name.is_empty()) {
+                    // Warn if the name isn't a valid Python identifier
+                    let valid_python_ident = name
+                        .chars()
+                        .enumerate()
+                        .all(|(i, c)| if i == 0 { c.is_alphabetic() || c == '_' } else { c.is_alphanumeric() || c == '_' });
+
+                    if !valid_python_ident {
+                        eprintln!(
+                            "Warning: annotation name {:?} may not be a valid Python identifier",
+                            name
+                        );
+                    }
+
+                    // A new annotation comment resets any previous pending one
+                    pending_annotation = Some(QueryAnnotation {
+                        name: name.to_string(),
+                        cardinality,
+                    });
+                    // We are not inside a statement yet
+                    in_statement = false;
+                }
+            }
+            // Any other comment line is ignored (doesn't clear pending_annotation)
+            continue;
+        }
+
+        // Non-blank, non-comment line: we are inside a SQL statement body.
+        in_statement = true;
+
+        // If this line ends with `;` the statement is complete — record the
+        // association and reset state.
+        if trimmed.ends_with(';') {
+            annotations.push(pending_annotation.take());
+            in_statement = false;
+            // A fresh statement could start on the very next line, so we do
+            // not reset pending_annotation here — take() already cleared it.
+        }
+    }
+
+    // If the last statement had no trailing `;`, record whatever we have.
+    if in_statement {
+        annotations.push(pending_annotation.take());
+    }
+
+    annotations
+}
+
 enum SQLDialect {
     Generic,
     SQLite,
@@ -188,8 +293,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     Ok(ast) => {
-                        for statement in ast {
-                            match process_sql_statement(&statement, &schema) {
+                        let annotations = extract_query_annotations(&sql);
+
+                        for (statement, annotation) in ast.iter().zip(annotations.into_iter()) {
+                            let annotation = match annotation {
+                                Some(a) => a,
+                                None => {
+                                    eprintln!(
+                                        "Warning: unannotated query in \"{}\" skipped: {}",
+                                        path.display(),
+                                        statement,
+                                    );
+                                    continue;
+                                }
+                            };
+
+                            eprintln!(
+                                "Processing query {:?} ({}) in \"{}\"",
+                                annotation.name,
+                                annotation.cardinality,
+                                path.display(),
+                            );
+
+                            match process_sql_statement(statement, annotation, &schema) {
                                 Ok(result) => {
                                     queries.push(result);
                                 }
@@ -222,8 +348,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" ---------- QUERIES --------- ");
     for query in queries {
         println!(
-            "SQL:{}\nResult:\nInput Fields:\n{:#?}\nOutput Fields:\n{:#?}",
-            query.statement, query.input_fields, query.output_fields
+            "SQL:{}\nAnnotation: {} ({})\nResult:\nInput Fields:\n{:#?}\nOutput Fields:\n{:#?}",
+            query.statement,
+            query.annotation.name,
+            query.annotation.cardinality,
+            query.input_fields,
+            query.output_fields
         );
     }
     println!("");
@@ -314,6 +444,7 @@ struct QueryOutputField {
 #[derive(Debug)]
 struct QueryParseResult {
     statement: Statement,
+    annotation: QueryAnnotation,
     input_fields: Vec<QueryInputField>,
     output_fields: Vec<QueryOutputField>,
 }
@@ -360,6 +491,7 @@ impl QueryError {
 
 fn process_sql_statement(
     statement: &Statement,
+    annotation: QueryAnnotation,
     schema: &SchemaParseResult,
 ) -> Result<QueryParseResult, QueryError> {
     let input_fields: Vec<QueryInputField> = Vec::new();
@@ -444,6 +576,7 @@ fn process_sql_statement(
 
     Ok(QueryParseResult {
         statement: statement.clone(),
+        annotation,
         input_fields,
         output_fields,
     })
