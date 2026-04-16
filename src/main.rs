@@ -5,7 +5,7 @@ use sqlparser::dialect;
 use sqlparser::parser::{Parser as SQLParser, ParserError};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror;
 use toml;
 
@@ -530,14 +530,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(result) => result,
     };
 
-    let mut queries: Vec<QueryParseResult> = Vec::new();
-
     for query_file_path in fs::read_dir(&queries_dir_path)? {
         match query_file_path {
             Ok(dir_entry) => {
                 let path = dir_entry.path();
 
-                println!("Reading {}", path.display());
+                // Only process .sql files
+                if path.extension().and_then(|e| e.to_str()) != Some("sql") {
+                    continue;
+                }
+
+                println!("Processing {}", path.display());
 
                 let sql = match fs::read_to_string(&path) {
                     Err(err) => {
@@ -547,19 +550,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(contents) => contents,
                 };
 
-                match SQLParser::parse_sql(parser_dialect, &sql) {
+                let queries = match SQLParser::parse_sql(parser_dialect, &sql) {
                     Err(err) => {
                         eprintln!(
                             "Failed to parse query file \"{}\": {}",
                             path.display(),
                             format_sql_parser_error(&err, &sql)
                         );
-
                         continue;
                     }
-
                     Ok(ast) => {
                         let annotations = extract_query_annotations(&sql);
+                        let mut file_queries: Vec<QueryParseResult> = Vec::new();
 
                         for (statement, annotation) in ast.iter().zip(annotations.into_iter()) {
                             let annotation = match annotation {
@@ -574,17 +576,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             };
 
-                            eprintln!(
-                                "Processing query {:?} ({}) in \"{}\"",
-                                annotation.name,
-                                annotation.cardinality,
-                                path.display(),
-                            );
+                            eprintln!("  query {:?} ({})", annotation.name, annotation.cardinality,);
 
                             match process_sql_statement(statement, annotation, &schema) {
-                                Ok(result) => {
-                                    queries.push(result);
-                                }
+                                Ok(result) => file_queries.push(result),
                                 Err(err) => {
                                     eprintln!(
                                         "Failed to process SQL statement \"{}\": {:?}",
@@ -594,7 +589,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+
+                        file_queries
                     }
+                };
+
+                if queries.is_empty() {
+                    eprintln!(
+                        "Warning: no annotated queries found in \"{}\", skipping codegen",
+                        path.display()
+                    );
+                    continue;
+                }
+
+                // Derive the output file path: same stem as the .sql file, .py extension
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("queries");
+                let source_filename = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown.sql");
+                let output_path = output_dir_path.join(format!("{}.py", stem));
+
+                match generate_python_file(&queries, source_filename, &output_path) {
+                    Ok(()) => println!("  wrote {}", output_path.display()),
+                    Err(err) => eprintln!("Failed to write \"{}\": {}", output_path.display(), err),
                 }
             }
             Err(err) => {
@@ -606,23 +627,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    println!(" ---------- SCHEMA --------- ");
-    println!("{:#?}", schema.table_fields);
-    println!("");
-
-    println!(" ---------- QUERIES --------- ");
-    for query in queries {
-        println!(
-            "SQL:{}\nAnnotation: {} ({})\nResult:\nInput Fields:\n{:#?}\nOutput Fields:\n{:#?}",
-            query.statement,
-            query.annotation.name,
-            query.annotation.cardinality,
-            query.input_fields,
-            query.output_fields
-        );
-    }
-    println!("");
 
     Ok(())
 }
@@ -1020,6 +1024,336 @@ fn extract_output_fields_from_select_item(
     }
 
     output_fields
+}
+
+// ---------------------------------------------------------------------------
+// Python reserved keywords — field names matching these get a trailing `_`
+// ---------------------------------------------------------------------------
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
+];
+
+fn is_python_keyword(name: &str) -> bool {
+    PYTHON_KEYWORDS.contains(&name)
+}
+
+/// Convert a `snake_case` or `PascalCase` name to `PascalCase`.
+/// `get_user_by_id` → `GetUserById`
+/// `GetUserById`    → `GetUserById`  (already Pascal)
+fn to_pascal_case(name: &str) -> String {
+    // If name contains underscores, treat as snake_case
+    if name.contains('_') {
+        name.split('_')
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                let mut c = s.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                }
+            })
+            .collect()
+    } else {
+        // Already PascalCase or single word — capitalise first letter only
+        let mut c = name.chars();
+        match c.next() {
+            None => String::new(),
+            Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+        }
+    }
+}
+
+/// Convert a name to `SCREAMING_SNAKE_CASE`.
+/// `get_user_by_id` → `GET_USER_BY_ID`
+/// `GetUserById`    → `GET_USER_BY_ID`
+fn to_screaming_snake(name: &str) -> String {
+    if name.contains('_') {
+        name.to_uppercase()
+    } else {
+        // PascalCase → insert underscores before uppercase letters (except first)
+        let mut result = String::new();
+        for (i, c) in name.chars().enumerate() {
+            if c.is_uppercase() && i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_uppercase().next().unwrap());
+        }
+        result
+    }
+}
+
+/// Sanitise a field name: append `_` if it is a Python keyword.
+fn sanitise_field_name(name: &str) -> String {
+    if is_python_keyword(name) {
+        format!("{}_", name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Collect the set of non-typing extra imports needed given a list of Python
+/// type strings. Typing imports (Any, Optional, Protocol) are handled
+/// separately in a single consolidated `from typing import ...` line.
+fn collect_stdlib_imports(types: &[&str]) -> Vec<&'static str> {
+    let mut imports: Vec<&'static str> = Vec::new();
+
+    if types.iter().any(|t| t.starts_with("datetime.")) {
+        imports.push("import datetime");
+    }
+    if types.iter().any(|t| *t == "Decimal") {
+        imports.push("from decimal import Decimal");
+    }
+
+    imports
+}
+
+/// Generate a `.py` file from a list of parsed queries and write it to `output_path`.
+fn generate_python_file(
+    queries: &[QueryParseResult],
+    source_filename: &str,
+    output_path: &Path,
+) -> Result<(), std::io::Error> {
+    // Detect naming collisions: two queries producing the same row class name
+    let mut class_names_seen: Vec<String> = Vec::new();
+    for query in queries {
+        if matches!(query.annotation.cardinality, QueryCardinality::Exec) {
+            continue;
+        }
+        let class_name = format!("{}Row", to_pascal_case(&query.annotation.name));
+        if class_names_seen.contains(&class_name) {
+            eprintln!(
+                "Error: duplicate row class name \"{}\" in \"{}\", skipping file generation",
+                class_name, source_filename
+            );
+            return Ok(());
+        }
+        class_names_seen.push(class_name);
+    }
+
+    // Gather all type strings across input and output fields to determine imports
+    let mut all_types: Vec<String> = Vec::new();
+    let has_one = queries
+        .iter()
+        .any(|q| matches!(q.annotation.cardinality, QueryCardinality::One));
+
+    for query in queries {
+        for f in &query.input_fields {
+            all_types.push(f.data_type.clone());
+        }
+        for f in &query.output_fields {
+            if let Some(sql_type) = output_field_sql_type(f) {
+                all_types.push(sql_type_to_python(&sql_type).to_string());
+            }
+        }
+    }
+    // Optional needs Any too
+    if has_one {
+        all_types.push("Optional".to_string());
+    }
+
+    let type_refs: Vec<&str> = all_types.iter().map(|s| s.as_str()).collect();
+    let stdlib_imports = collect_stdlib_imports(&type_refs);
+
+    let needs_any = all_types.iter().any(|t| t == "Any");
+
+    let mut out = String::new();
+
+    // Header
+    out.push_str(&format!(
+        "# GENERATED BY icantbelieveitsnotsql -- DO NOT EDIT\n# Source: {}\n\n",
+        source_filename
+    ));
+
+    // Always-present imports
+    out.push_str("from __future__ import annotations\n\n");
+    out.push_str("import dataclasses\n");
+    for import in &stdlib_imports {
+        out.push_str(import);
+        out.push('\n');
+    }
+    // Single consolidated typing import line
+    {
+        let mut typing_names: Vec<&str> = Vec::new();
+        // Any always needed (used by _Cursor protocol)
+        typing_names.push("Any");
+        if has_one {
+            typing_names.push("Optional");
+        }
+        typing_names.push("Protocol");
+        out.push_str(&format!("from typing import {}\n", typing_names.join(", ")));
+    }
+    let _ = needs_any; // always included in typing block above
+    out.push('\n');
+
+    // _Cursor protocol
+    out.push_str("\nclass _Cursor(Protocol):\n");
+    out.push_str("    def execute(self, sql: str, parameters: Any = ...) -> Any: ...\n");
+    out.push_str("    def fetchone(self) -> tuple[Any, ...] | None: ...\n");
+    out.push_str("    def fetchall(self) -> list[tuple[Any, ...]]: ...\n");
+
+    // One block per query
+    for query in queries {
+        let fn_name = query.annotation.name.to_lowercase();
+        let pascal_name = to_pascal_case(&query.annotation.name);
+        let const_name = format!("_{}_SQL", to_screaming_snake(&query.annotation.name));
+        let row_class = format!("{}Row", pascal_name);
+
+        out.push_str("\n\n");
+        out.push_str(&format!("# {}\n", "-".repeat(75 - fn_name.len().min(73))));
+        out.push_str(&format!("# {}\n", fn_name));
+        out.push_str(&format!("# {}\n", "-".repeat(75 - fn_name.len().min(73))));
+
+        // SQL constant — embed verbatim, strip trailing semicolon
+        let sql_text = query
+            .statement
+            .to_string()
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        out.push_str(&format!(
+            "\n{} = \"\"\"\n{}\n\"\"\"\n",
+            const_name, sql_text
+        ));
+
+        let is_exec = matches!(query.annotation.cardinality, QueryCardinality::Exec);
+
+        // Row dataclass (only for :one and :many)
+        if !is_exec {
+            out.push('\n');
+            out.push('\n');
+            out.push_str("@dataclasses.dataclass\n");
+            out.push_str(&format!("class {}:\n", row_class));
+            if query.output_fields.is_empty() {
+                out.push_str("    pass\n");
+            } else {
+                for field in &query.output_fields {
+                    let field_name = sanitise_field_name(&field.name);
+                    let py_type = output_field_python_type(field);
+                    out.push_str(&format!("    {}: {}\n", field_name, py_type));
+                }
+            }
+        }
+
+        // Function signature
+        let return_type = match &query.annotation.cardinality {
+            QueryCardinality::One => format!("Optional[{}]", row_class),
+            QueryCardinality::Many => format!("list[{}]", row_class),
+            QueryCardinality::Exec => "None".to_string(),
+        };
+
+        // Build parameter list
+        let mut params = vec!["cursor: _Cursor".to_string()];
+        if !query.input_fields.is_empty() {
+            params.push("*".to_string());
+            for f in &query.input_fields {
+                let param_name = sanitise_field_name(&f.name);
+                params.push(format!("{}: {}", param_name, f.data_type));
+            }
+        }
+
+        // Blank line before def
+        out.push('\n');
+        out.push_str(&format!(
+            "def {}({}) -> {}:\n",
+            fn_name,
+            params.join(", "),
+            return_type
+        ));
+
+        // Function body: build execute call
+        let execute_args = build_execute_args(&query.input_fields);
+        if execute_args.is_empty() {
+            out.push_str(&format!("    cursor.execute({})\n", const_name));
+        } else {
+            out.push_str(&format!(
+                "    cursor.execute({}, {})\n",
+                const_name, execute_args
+            ));
+        }
+
+        match &query.annotation.cardinality {
+            QueryCardinality::Exec => {
+                // nothing to return
+            }
+            QueryCardinality::One => {
+                out.push_str("    row = cursor.fetchone()\n");
+                out.push_str("    if row is None:\n");
+                out.push_str("        return None\n");
+                out.push_str(&format!("    return {}(\n", row_class));
+                for (i, field) in query.output_fields.iter().enumerate() {
+                    let field_name = sanitise_field_name(&field.name);
+                    out.push_str(&format!("        {}=row[{}],\n", field_name, i));
+                }
+                out.push_str("    )\n");
+            }
+            QueryCardinality::Many => {
+                out.push_str("    rows = cursor.fetchall()\n");
+                out.push_str(&format!("    return [\n        {}(\n", row_class));
+                for (i, field) in query.output_fields.iter().enumerate() {
+                    let field_name = sanitise_field_name(&field.name);
+                    out.push_str(&format!("            {}=row[{}],\n", field_name, i));
+                }
+                out.push_str("        )\n        for row in rows\n    ]\n");
+            }
+        }
+    }
+
+    out.push('\n');
+
+    fs::write(output_path, out)
+}
+
+/// Build the second argument to `cursor.execute()` based on the input fields.
+/// Named params → dict literal.  Positional ($1) → tuple.  Empty → "".
+fn build_execute_args(input_fields: &[QueryInputField]) -> String {
+    if input_fields.is_empty() {
+        return String::new();
+    }
+
+    // Check if any field is positional ($1-style)
+    let all_named = input_fields.iter().all(|f| !f.name.starts_with('$'));
+
+    if all_named {
+        // {":name": name, ...} — but sqlite3 named style uses plain dict keys
+        let pairs: Vec<String> = input_fields
+            .iter()
+            .map(|f| {
+                let safe = sanitise_field_name(&f.name);
+                format!("\"{}\": {}", f.name, safe)
+            })
+            .collect();
+        format!("{{{}}}", pairs.join(", "))
+    } else {
+        // Tuple of positional args
+        let args: Vec<String> = input_fields
+            .iter()
+            .map(|f| sanitise_field_name(&f.name))
+            .collect();
+        if args.len() == 1 {
+            format!("({},)", args[0])
+        } else {
+            format!("({})", args.join(", "))
+        }
+    }
+}
+
+/// Get the SQL type string for an output field (for mapping to Python type).
+/// We stored the resolved table + field in QueryOutputField; look it up from
+/// the field's name since we don't currently carry the data_type through.
+/// For now, return None and fall back to Any — the output field data_type
+/// will be wired in a future improvement.
+fn output_field_sql_type(_field: &QueryOutputField) -> Option<String> {
+    None
+}
+
+/// Get the Python type annotation for an output field.
+/// Currently falls back to Any since we don't carry data_type through
+/// QueryOutputField yet. This will improve once output fields carry their type.
+fn output_field_python_type(_field: &QueryOutputField) -> &'static str {
+    "Any"
 }
 
 #[cfg(test)]
