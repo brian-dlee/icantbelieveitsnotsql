@@ -2,3 +2,4 @@
 dialect = "sqlite"
 queries-dir = "./queries"
 schema-file = "schema.sql"
+output-dir = "./generated"
