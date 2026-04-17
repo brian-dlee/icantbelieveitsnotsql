@@ -27,19 +27,39 @@ def load_schema(conn: sqlite3.Connection) -> None:
     # there is an active transaction, so we filter out TEMPORARY tables and
     # objects that are only needed for the real database (indexes, etc.) that
     # may reference tables not relevant to our smoke test.  We run each
-    # statement individually so we can skip unsupported ones gracefully.
+    # statement individually so we can skip known-benign ones gracefully.
+    _BENIGN_PATTERNS = (
+        "temporary",  # CREATE TEMPORARY TABLE — not supported in executescript
+        "expression",  # expression indexes on functions unsupported by older SQLite
+        "no such function",  # sqlite functions unavailable in the current build
+    )
+    skipped: list[tuple[str, str]] = []
     for statement in sql.split(";"):
         stmt = statement.strip()
         if not stmt:
             continue
         try:
             conn.execute(stmt)
-        except sqlite3.OperationalError:
-            # Skip statements that fail (e.g., TEMPORARY tables, expression
-            # indexes on functions not supported in older SQLite builds).
-            pass
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if any(pat in msg for pat in _BENIGN_PATTERNS):
+                skipped.append((stmt, str(exc)))
+            else:
+                raise
 
     conn.commit()
+
+    users_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'"
+    ).fetchone()
+    assert users_exists is not None, (
+        "Schema load failed: required table `users` not found"
+    )
+
+    if skipped:
+        print(
+            f"  (skipped {len(skipped)} schema statement(s) due to known SQLite limitations)"
+        )
 
 
 def test_create_and_get_user(cursor: sqlite3.Cursor) -> None:
