@@ -33,10 +33,24 @@ pub struct QueryAnnotation {
 // Query result types
 // ---------------------------------------------------------------------------
 
+/// The syntactic style of the original placeholder in the SQL source.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaceholderKind {
+    /// Named placeholder: `:name`
+    Named,
+    /// Positional dollar placeholder: `$1`
+    Dollar,
+    /// Anonymous question-mark placeholder: `?`
+    QuestionMark,
+}
+
 #[derive(Debug)]
 pub struct QueryInputField {
     pub name: String,
     pub data_type: String,
+    /// The style of the original SQL placeholder, used by codegen to decide
+    /// whether to emit a named dict or a positional tuple.
+    pub placeholder_kind: PlaceholderKind,
 }
 
 #[derive(Debug)]
@@ -254,6 +268,7 @@ pub fn build_input_fields(
                 fields.push(QueryInputField {
                     name,
                     data_type: "Any".to_string(),
+                    placeholder_kind: PlaceholderKind::QuestionMark,
                 });
             }
         } else if let Some(name) = placeholder.strip_prefix(':') {
@@ -263,6 +278,7 @@ pub fn build_input_fields(
                 fields.push(QueryInputField {
                     name: name.to_string(),
                     data_type,
+                    placeholder_kind: PlaceholderKind::Named,
                 });
             }
         } else if placeholder.starts_with('$') {
@@ -271,6 +287,7 @@ pub fn build_input_fields(
                 fields.push(QueryInputField {
                     name: placeholder.clone(),
                     data_type: "Any".to_string(),
+                    placeholder_kind: PlaceholderKind::Dollar,
                 });
             }
         } else {
@@ -279,6 +296,7 @@ pub fn build_input_fields(
                 fields.push(QueryInputField {
                     name: placeholder.clone(),
                     data_type: "Any".to_string(),
+                    placeholder_kind: PlaceholderKind::Named,
                 });
             }
         }
@@ -393,7 +411,21 @@ pub fn process_sql_statement(
 
     match statement {
         Statement::Query(query) => {
-            let select = query.body.as_select().unwrap();
+            let select = match query.body.as_select() {
+                Some(s) => s,
+                None => {
+                    eprintln!(
+                        "Unsupported query type: only simple SELECT statements are supported \
+                         (UNION, VALUES, etc. are not yet handled)"
+                    );
+                    return Ok(QueryParseResult {
+                        statement: statement.clone(),
+                        annotation,
+                        input_fields: vec![],
+                        output_fields: vec![],
+                    });
+                }
+            };
             let mut aliases: HashMap<String, String> = HashMap::new();
 
             for table_with_joins in &select.from {

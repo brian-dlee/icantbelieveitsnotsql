@@ -7,13 +7,12 @@ pub fn extract_debug_block_with_line_number_range(
 ) -> String {
     let mut block_lines = Vec::new();
 
-    for (offset, line) in text
-        .split("\n")
-        .skip(line_start as usize)
-        .take((line_end - line_start) as usize)
-        .enumerate()
-    {
-        let line_number = line_start as usize + offset + 1;
+    // line_start is 1-based; convert to 0-based index and clamp to >= 0
+    let start_idx = (line_start - 1).max(0) as usize;
+    let count = (line_end - line_start + 1).max(0) as usize;
+
+    for (offset, line) in text.split("\n").skip(start_idx).take(count).enumerate() {
+        let line_number = start_idx + offset + 1;
         block_lines.push(format!("{}\t{}", line_number, line));
     }
 
@@ -41,9 +40,13 @@ pub fn extract_line_number_from_parse_error(parse_error: &str) -> i32 {
 pub fn format_sql_parser_error(error: &ParserError, sql: &str) -> String {
     if let ParserError::ParserError(msg) = &error {
         let line_number = extract_line_number_from_parse_error(msg);
-        let debug =
-            extract_debug_block_with_line_number_range(sql, line_number - 2, line_number + 2);
-        format!("{}: {}", error, debug)
+        if line_number > 0 {
+            let start = (line_number - 2).max(1);
+            let debug = extract_debug_block_with_line_number_range(sql, start, line_number + 2);
+            format!("{}: {}", error, debug)
+        } else {
+            error.to_string()
+        }
     } else {
         error.to_string()
     }

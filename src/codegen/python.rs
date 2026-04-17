@@ -1,4 +1,6 @@
-use crate::query::{QueryCardinality, QueryInputField, QueryOutputField, QueryParseResult};
+use crate::query::{
+    PlaceholderKind, QueryCardinality, QueryInputField, QueryOutputField, QueryParseResult,
+};
 use std::fs;
 use std::path::Path;
 
@@ -253,23 +255,24 @@ pub fn generate_python_file(
 }
 
 /// Build the second argument to `cursor.execute()`.
+///
+/// - Named (`:name`) params → `{"name": name, ...}` dict
+/// - Positional (`?` or `$1`) params → `(p1, p2)` tuple
 fn build_execute_args(input_fields: &[QueryInputField]) -> String {
     if input_fields.is_empty() {
         return String::new();
     }
 
-    let all_named = input_fields.iter().all(|f| !f.name.starts_with('$'));
+    // Use the placeholder_kind of the first field to decide the style.
+    // Mixed styles in one query are unusual; named wins unless all are positional.
+    let all_positional = input_fields.iter().all(|f| {
+        matches!(
+            f.placeholder_kind,
+            PlaceholderKind::QuestionMark | PlaceholderKind::Dollar
+        )
+    });
 
-    if all_named {
-        let pairs: Vec<String> = input_fields
-            .iter()
-            .map(|f| {
-                let safe = sanitise_field_name(&f.name);
-                format!("\"{}\": {}", f.name, safe)
-            })
-            .collect();
-        format!("{{{}}}", pairs.join(", "))
-    } else {
+    if all_positional {
         let args: Vec<String> = input_fields
             .iter()
             .map(|f| sanitise_field_name(&f.name))
@@ -279,6 +282,16 @@ fn build_execute_args(input_fields: &[QueryInputField]) -> String {
         } else {
             format!("({})", args.join(", "))
         }
+    } else {
+        // Named dict — use the original parameter name (without leading `:`) as the key
+        let pairs: Vec<String> = input_fields
+            .iter()
+            .map(|f| {
+                let safe = sanitise_field_name(&f.name);
+                format!("\"{}\": {}", f.name, safe)
+            })
+            .collect();
+        format!("{{{}}}", pairs.join(", "))
     }
 }
 
