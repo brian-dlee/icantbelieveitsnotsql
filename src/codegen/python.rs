@@ -88,11 +88,13 @@ pub fn generate_python_file(
         }
         let class_name = format!("{}Row", to_pascal_case(&query.annotation.name));
         if class_names_seen.contains(&class_name) {
-            eprintln!(
-                "Error: duplicate row class name \"{}\" in \"{}\", skipping file generation",
-                class_name, source_filename
-            );
-            return Ok(());
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "duplicate row class name \"{}\" in \"{}\"",
+                    class_name, source_filename
+                ),
+            ));
         }
         class_names_seen.push(class_name);
     }

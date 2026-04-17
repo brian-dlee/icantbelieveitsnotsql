@@ -20,10 +20,21 @@ pub struct SchemaParseResult {
 }
 
 impl SchemaParseResult {
+    /// Search all tables in the schema for a column named `name`.
     pub fn resolve_fields_by_name(&self, name: &str) -> Vec<FieldSource> {
+        self.resolve_fields_in_tables(name, &[])
+    }
+
+    /// Search only the specified `tables` for a column named `name`.
+    /// If `tables` is empty the full schema is searched (same as
+    /// `resolve_fields_by_name`).
+    pub fn resolve_fields_in_tables(&self, name: &str, tables: &[&str]) -> Vec<FieldSource> {
         let mut result: Vec<FieldSource> = Vec::new();
 
         for (table_name, table_fields) in &self.table_fields {
+            if !tables.is_empty() && !tables.contains(&table_name.as_str()) {
+                continue;
+            }
             for (field_name, field_data_type) in table_fields {
                 if name == field_name {
                     result.push(FieldSource::TableSource {

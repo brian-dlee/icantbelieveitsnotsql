@@ -1,5 +1,7 @@
 use crate::schema::{FieldSource, SchemaParseResult};
-use sqlparser::ast::{Expr, FromTable, SelectItem, SetExpr, Statement, TableFactor, Value};
+use sqlparser::ast::{
+    Expr, FromTable, JoinConstraint, SelectItem, SetExpr, Statement, TableFactor, Value,
+};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -88,12 +90,61 @@ pub enum QueryError {
     InvalidFieldReference {
         field_name: String,
     },
+    UnsupportedExpression {
+        description: String,
+    },
 }
 
 impl QueryError {
-    pub fn format(&self, _statement: &Statement, _sql: &str) -> String {
-        String::from("")
+    pub fn format(&self, statement: &Statement, _sql: &str) -> String {
+        match self {
+            QueryError::InvalidFieldReference { field_name } => format!(
+                "Invalid field reference: column \"{}\" not found in schema (query: {})",
+                field_name, statement
+            ),
+            QueryError::AmbiguousFieldReference {
+                field_name,
+                candidates,
+            } => {
+                let candidate_list: Vec<String> = candidates
+                    .iter()
+                    .map(|c| match c {
+                        FieldSource::TableSource { table, column, .. } => {
+                            format!("{}.{}", table, column)
+                        }
+                    })
+                    .collect();
+                format!(
+                    "Ambiguous field reference: column \"{}\" exists in multiple tables: {} \
+                     (qualify it with a table alias, query: {})",
+                    field_name,
+                    candidate_list.join(", "),
+                    statement
+                )
+            }
+            QueryError::UnsupportedExpression { description } => {
+                format!(
+                    "Unsupported expression: {} (query: {})",
+                    description, statement
+                )
+            }
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Python keyword set (used for annotation name validation)
+// ---------------------------------------------------------------------------
+
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
+];
+
+fn is_python_keyword(name: &str) -> bool {
+    PYTHON_KEYWORDS.contains(&name)
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +190,19 @@ pub fn extract_query_annotations(sql: &str) -> Vec<Option<QueryAnnotation>> {
 
                     if !valid_python_ident {
                         eprintln!(
-                            "Warning: annotation name {:?} may not be a valid Python identifier",
+                            "Warning: annotation name {:?} is not a valid Python identifier, skipping",
                             name
                         );
+                        continue;
+                    }
+
+                    if is_python_keyword(name) {
+                        eprintln!(
+                            "Warning: annotation name {:?} is a Python keyword and cannot be \
+                             used as a function name, skipping",
+                            name
+                        );
+                        continue;
                     }
 
                     pending_annotation = Some(QueryAnnotation {
@@ -282,10 +343,12 @@ pub fn build_input_fields(
                 });
             }
         } else if placeholder.starts_with('$') {
-            if !seen.contains(placeholder) {
-                seen.push(placeholder.clone());
+            // Normalize "$1" -> "p1" so the generated Python identifier is valid.
+            let name = format!("p{}", placeholder.trim_start_matches('$'));
+            if !seen.contains(&name) {
+                seen.push(name.clone());
                 fields.push(QueryInputField {
-                    name: placeholder.clone(),
+                    name,
                     data_type: "Any".to_string(),
                     placeholder_kind: PlaceholderKind::Dollar,
                 });
@@ -439,16 +502,55 @@ pub fn process_sql_statement(
             }
 
             for entry in select.projection.iter() {
-                output_fields.extend(extract_output_fields_from_select_item(entry, &aliases))
+                match extract_output_fields_from_select_item(entry, &aliases) {
+                    Ok(fields) => output_fields.extend(fields),
+                    Err(e) => return Err(e),
+                }
+                // Also collect placeholders from projection expressions
+                match entry {
+                    SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                        collect_placeholders(expr, &mut raw_placeholders);
+                    }
+                    _ => {}
+                }
             }
 
+            // WHERE clause
             if let Some(expr) = &select.selection {
                 collect_placeholders(expr, &mut raw_placeholders);
             }
 
+            // JOIN ON clauses
+            for table_with_joins in &select.from {
+                for join in &table_with_joins.joins {
+                    if let JoinConstraint::On(expr) = match &join.join_operator {
+                        sqlparser::ast::JoinOperator::Join(c)
+                        | sqlparser::ast::JoinOperator::Inner(c)
+                        | sqlparser::ast::JoinOperator::Left(c)
+                        | sqlparser::ast::JoinOperator::LeftOuter(c)
+                        | sqlparser::ast::JoinOperator::Right(c)
+                        | sqlparser::ast::JoinOperator::RightOuter(c)
+                        | sqlparser::ast::JoinOperator::FullOuter(c) => c,
+                        _ => continue,
+                    } {
+                        collect_placeholders(expr, &mut raw_placeholders);
+                    }
+                }
+            }
+
+            // HAVING clause
+            if let Some(expr) = &select.having {
+                collect_placeholders(expr, &mut raw_placeholders);
+            }
+            let active_table_refs_for_resolution: Vec<&str> =
+                active_tables.iter().map(|s| s.as_str()).collect();
+
             for output_field in output_fields.iter_mut() {
                 if output_field.source.table.is_none() {
-                    let resolved_fields = schema.resolve_fields_by_name(&output_field.source.field);
+                    let resolved_fields = schema.resolve_fields_in_tables(
+                        &output_field.source.field,
+                        &active_table_refs_for_resolution,
+                    );
 
                     if resolved_fields.len() == 0 {
                         return Err(QueryError::InvalidFieldReference {
@@ -567,9 +669,9 @@ fn extract_aliases_using_relation(table_factor: &TableFactor) -> HashMap<String,
 fn extract_output_field_from_expr(
     expr: &Expr,
     aliases: &HashMap<String, String>,
-) -> Option<QueryOutputField> {
+) -> Result<QueryOutputField, QueryError> {
     match expr {
-        Expr::Identifier(ident) => Some(QueryOutputField {
+        Expr::Identifier(ident) => Ok(QueryOutputField {
             source: QueryOutputFieldSource {
                 database: None,
                 schema: None,
@@ -584,7 +686,7 @@ fn extract_output_field_from_expr(
                 if let Some(aliased_table) = aliases.get(&table) {
                     table = aliased_table.clone();
                 }
-                Some(QueryOutputField {
+                Ok(QueryOutputField {
                     source: QueryOutputFieldSource {
                         database: None,
                         schema: None,
@@ -594,7 +696,7 @@ fn extract_output_field_from_expr(
                     name: field.to_string(),
                 })
             }
-            [database_or_schema, table, field] => Some(QueryOutputField {
+            [database_or_schema, table, field] => Ok(QueryOutputField {
                 source: QueryOutputFieldSource {
                     database: None,
                     schema: Some(database_or_schema.to_string()),
@@ -603,7 +705,7 @@ fn extract_output_field_from_expr(
                 },
                 name: field.to_string(),
             }),
-            [database, schema, table, field] => Some(QueryOutputField {
+            [database, schema, table, field] => Ok(QueryOutputField {
                 source: QueryOutputFieldSource {
                     database: Some(database.to_string()),
                     schema: Some(schema.to_string()),
@@ -612,55 +714,43 @@ fn extract_output_field_from_expr(
                 },
                 name: field.to_string(),
             }),
-            _ => {
-                eprintln!(
-                    "unsupported compound ident ({}): {:?}",
-                    idents.len(),
-                    idents
-                );
-                None
-            }
+            _ => Err(QueryError::UnsupportedExpression {
+                description: format!(
+                    "unsupported compound identifier with {} parts",
+                    idents.len()
+                ),
+            }),
         },
-        x => {
-            eprintln!("SELECT expression not supported: {:#?}", x);
-            None
-        }
+        x => Err(QueryError::UnsupportedExpression {
+            description: format!("computed expression in SELECT not supported: {}", x),
+        }),
     }
 }
 
 fn extract_output_fields_from_select_item(
     select_item: &SelectItem,
     aliases: &HashMap<String, String>,
-) -> Vec<QueryOutputField> {
+) -> Result<Vec<QueryOutputField>, QueryError> {
     let mut output_fields: Vec<QueryOutputField> = Vec::new();
 
     match select_item {
         SelectItem::UnnamedExpr(expr) => {
-            if let Some(output_field) = extract_output_field_from_expr(expr, aliases) {
-                output_fields.push(output_field)
-            }
+            output_fields.push(extract_output_field_from_expr(expr, aliases)?);
         }
         SelectItem::ExprWithAlias { expr, alias } => {
-            if let Some(mut output_field) = extract_output_field_from_expr(expr, aliases) {
-                output_field.name = alias.to_string();
-                output_fields.push(output_field)
-            }
+            let mut output_field = extract_output_field_from_expr(expr, aliases)?;
+            output_field.name = alias.to_string();
+            output_fields.push(output_field);
         }
-        SelectItem::QualifiedWildcard(..) => {
-            eprintln!(
-                "SELECT expression not supported: don't use wildcards. {:#?}",
-                select_item
-            );
-        }
-        SelectItem::Wildcard(..) => {
-            eprintln!(
-                "SELECT expression not supported: don't use wildcards. {:#?}",
-                select_item
-            );
+        SelectItem::QualifiedWildcard(..) | SelectItem::Wildcard(..) => {
+            return Err(QueryError::UnsupportedExpression {
+                description: "wildcard SELECT (*) is not supported; list columns explicitly"
+                    .to_string(),
+            });
         }
     }
 
-    output_fields
+    Ok(output_fields)
 }
 
 // ---------------------------------------------------------------------------
