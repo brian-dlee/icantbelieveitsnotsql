@@ -1,5 +1,7 @@
 [generate]
 dialect = "sqlite"
 queries-dir = "./queries"
-schema-file = "schema.sql"
+schema-files = ["schema.sql"]
+
+[generate.python]
 output-dir = "./generated"

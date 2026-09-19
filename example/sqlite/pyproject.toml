@@ -1,0 +1,9 @@
+[project]
+name = "butter-sqlite-example"
+version = "0.1.0"
+description = "Smoke test for butter output against a wide range of SQLite DDL."
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.20",
+    "pydantic>=2.7",
+]

@@ -1,68 +1,99 @@
-# How icantbelieveitsnotsql Generates Python Code from SQL
+# How butter Generates Python Code from SQL
 
 ## Overview
 
-`icantbelieveitsnotsql` is a Rust CLI tool (v0.1.0) that generates typed Python code directly from annotated SQL files. Inspired by [sqlc](https://sqlc.dev/), the project is explicitly [designed to be "the thinnest possible layer between SQL and a desired programming language"](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/README.md#L1-L6) — you write plain `.sql` files, annotate each query with a name and cardinality, and the tool produces callable Python functions with zero runtime dependencies in the generated code.
+`butter` is a Rust CLI tool that generates typed async Python code directly from annotated SQL files. Inspired by [sqlc](https://sqlc.dev/), the project turns plain `.sql` files into Python modules with typed, async functions — you write SQL with `-- name: function_name` and `:one|:many|:exec|:execrows|:execlastid|:execmany` annotations, and the tool produces async Python functions with pydantic models and zero runtime dependencies beyond `aiosqlite` and `pydantic`.
 
-The core promise from the [README](https://app.dosu.dev/documents/24f032c8-700c-4190-b2ff-abe38b38187f):
+The core approach from the [README](https://app.dosu.dev/documents/24f032c8-700c-4190-b2ff-abe38b38187f):
 
-> Create code for any target application language from SQL. Inspired by sqlc, but designed to be the thinnest possible layer between SQL and a desired programming language. Write SQL files directly, and construct callable code with zero dependencies.
+> `butter` turns plain SQL files into typed data-access code, in the spirit of sqlc. You write the SQL you would run anyway, annotate each statement with a name and a result shape, and `butter generate` writes one module per SQL file with an `async` function per query and a pydantic model tailored to each result set.
 
 At a high level, the pipeline is:
 
 1. **Configure** — a `butter.toml` file in your project directory specifies the SQL dialect, paths to your schema and query files, and where to write generated output.
-2. **Parse** — the tool reads your `schema.sql` to build a column-type map, then parses each `.sql` query file using [sqlparser-rs](https://github.com/sqlparser-rs/sqlparser-rs) to produce an AST.
-3. **Annotate** — a pre-pass over the raw SQL text extracts `-- name :cardinality` comments that name each query and declare whether it returns one row, many rows, or no rows.
-4. **Generate** — for each `.sql` file, a corresponding `.py` file is emitted containing a `_Cursor` protocol, SQL string constants, row dataclasses, and fully-typed query functions.
+2. **Parse** — the tool reads `CREATE TABLE` statements from query files and optional `schema-files` to build a column-type map, then parses each `.sql` query file using [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) to produce an AST.
+3. **Analyze** — the analyzer extracts `-- name: function_name :cardinality` headers, resolves output columns through `*` expansion, joins, CTEs, unions, subqueries, and `RETURNING`, and infers parameter types from context (compared columns, assignments, function arguments, `LIMIT`/`OFFSET`, or `IS NULL` patterns).
+4. **Generate** — for each `.sql` file, a corresponding `.py` file is emitted containing pydantic `<Name>Row` and `<Name>Params` models, SQL string constants, and fully-typed async functions that use `aiosqlite.Cursor`.
 
-The tool currently targets Python as its only output language, with the module structure split across [[1]](https://github.com/brian-dlee/icantbelieveitsnotsql/tree/HEAD/src):
+The tool currently targets Python with the aiosqlite driver as its only output, with the module structure split across [[1]](https://github.com/brian-dlee/icantbelieveitsnotsql/tree/HEAD/src):
 
 | File | Responsibility |
 |------|---------------|
-| `src/main.rs` | CLI entry point and orchestration loop |
-| `src/config.rs` | Configuration types and dialect enum |
-| `src/schema.rs` | Schema file parsing and column-type lookup |
-| `src/query.rs` | Annotation extraction, placeholder parsing, type inference |
-| `src/codegen/python.rs` | Python source file emission |
+| `src/main.rs` | CLI entry point (`generate`, `check` subcommands) |
+| `src/config.rs` | Configuration types and TOML parsing |
+| `src/dialect.rs` | SQL dialect enum mapping |
+| `src/schema.rs` | Schema parsing and column-type lookup |
+| `src/queryfile.rs` | Query file splitting and header extraction |
+| `src/analyze.rs` | Type inference, column resolution, parameter analysis |
+| `src/python.rs` | Python source file emission (pydantic models, async functions) |
+| `src/generate.rs` | Orchestration loop |
 
 ## CLI and Configuration
 
 ### Invocation
 
-The binary takes a single optional positional argument — a path to the project directory. When omitted, it defaults to the current working directory [[2]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/main.rs#L23-L26):
+The CLI provides two subcommands, each taking an optional path to the project directory (defaults to `.`) [[2]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/main.rs):
 
 ```sh
-# Run from inside the project directory
-icantbelieveitsnotsql
+# Generate from the current directory
+butter generate
 
-# Or point at a specific project
-icantbelieveitsnotsql ./example/sqlite
+# Point at a specific project
+butter generate ./example/aiosqlite
+
+# Analyze without writing files
+butter check ./example/aiosqlite
 ```
+
+The `generate` command writes output files; the `check` command analyzes queries and reports errors without writing anything.
 
 ### `butter.toml`
 
-On startup the CLI reads a `butter.toml` file from the project directory [[3]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/main.rs#L26-L31). All fields live under a `[generate]` table and are optional, with the defaults shown below [[4]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/config.rs#L36-L53):
+On startup the CLI reads a `butter.toml` file from the project directory [[3]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/config.rs). Configuration has two main sections:
+
+**`[generate]`** (top-level settings):
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `dialect` | `"generic"` | SQL dialect used during parsing |
-| `queries-dir` | `"queries"` | Directory containing `.sql` query files |
-| `schema-file` | `"schema.sql"` | Path to the DDL schema file |
-| `output-dir` | `"generated"` | Directory where generated `.py` files are written |
+| `dialect` | `"sqlite"` | SQL dialect used during parsing |
+| `queries-dir` | `"queries"` | Directory containing `.sql` query files (the examples set `"sql/butter"`) |
+| `schema-files` | `[]` | Optional list of paths to DDL schema files |
 
-Example from the SQLite example project [[5]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/example/sqlite/butter.toml):
+**`[generate.python]`** (Python-specific settings):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `output-dir` | (required) | Directory where generated `.py` files are written |
+| `driver` | `"aiosqlite"` | Database driver (only `aiosqlite` supported currently) |
+
+**`[generate.python.column-types]`** and **`[generate.python.sql-types]`** (optional type overrides):
+
+Type overrides allow you to replace the inferred Python type for specific columns or SQL types with custom types (e.g., enums, `Annotated` types with validators). Dotted names are imported by the generated modules.
+
+Example from the aiosqlite example project [[5]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/example/aiosqlite/butter.toml):
 
 ```toml
 [generate]
 dialect = "sqlite"
-queries-dir = "./queries"
-schema-file = "schema.sql"
-output-dir = "./generated"
+queries-dir = "sql/butter"
+# Tables can be declared inside query files or in separate schema files
+# schema-files = ["sql/schema.sql"]
+
+[generate.python]
+output-dir = "app/butter"
+driver = "aiosqlite"
+
+[generate.python.column-types]
+"ticket.status" = "app.types.Status"
+"ticket.last_seen_at" = "app.types.SqlUtcTimestamp"
+
+# [generate.python.sql-types]
+# "DATETIME" = "app.types.SqlUtcTimestamp"
 ```
 
 ### SQL Dialects
 
-The `dialect` field maps to one of four supported [sqlparser-rs](https://github.com/sqlparser-rs/sqlparser-rs) dialects [[6]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/config.rs#L6-L28):
+The `dialect` field maps to one of four supported [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs) dialects [[6]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/dialect.rs):
 
 | Config value | sqlparser dialect |
 |---|---|
@@ -71,345 +102,411 @@ The `dialect` field maps to one of four supported [sqlparser-rs](https://github.
 | `"postgresql"` | `PostgreSqlDialect` |
 | `"mysql"` | `MySqlDialect` |
 
-Any other value causes an `SQLDialectError::Unsupported` error at startup.
+Only the `sqlite` dialect has full type inference support; other dialects parse but produce `typing.Any` for most types with warnings.
 
 ### Processing Loop
 
-After reading configuration the tool [[7]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/main.rs#L80-L200):
+After reading configuration the tool [[7]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/generate.rs):
 
-1. Reads and parses `schema.sql` using `parse_schema_file()`, building a `SchemaParseResult` that maps each table name to its column types.
-2. Creates the `output-dir` if it does not exist.
-3. Iterates over every file in `queries-dir`; files without a `.sql` extension are silently skipped.
-4. For each `.sql` file: runs the SQL through `SQLParser::parse_sql()` to produce an AST, runs `extract_query_annotations()` as a pre-pass over the raw text, zips the two results together, warns and skips any statement without an annotation, and calls `process_sql_statement()` on each annotated query.
-5. Calls `generate_python_file()` to write a `.py` file whose stem matches the `.sql` file's stem.
+1. Parses the selected dialect and reads optional `schema-files`, merging each `CREATE TABLE` into the schema with `Schema::add_create_table()`.
+2. Iterates over every `.sql` file in `queries-dir`.
+3. For each `.sql` file:
+   - Runs a header extraction pass (`parse_query_file()`) that separates preamble schema statements (before the first `-- name:` header) from annotated query blocks.
+   - Parses preamble statements and merges any `CREATE TABLE` definitions into the schema.
+   - Parses each annotated query block, runs the analyzer to infer parameter types and resolve output columns, and collects any warnings or errors.
+4. If any query has errors, prints diagnostics as `file.sql:LINE: message` and exits without writing files.
+5. Creates the `output-dir` if it does not exist, writes `__init__.py` if missing (once), and calls `render_module()` to write a `.py` file whose stem matches the `.sql` file's stem.
 
-Files with no annotated queries produce a warning and no output file.
+Files with no annotated queries are skipped.
 
 ## Query Annotation Syntax
 
-### Annotation Comments
+### Annotation Headers
 
-Every SQL statement that should produce generated code must be preceded by an annotation comment in the form [[8]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L154-L231):
+Every SQL statement that should produce generated code must be preceded by an annotation header in the form [[8]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/queryfile.rs):
 
 ```
--- <name> :<cardinality>
+-- name: <function_name> :<command>
+-- optional free-form docstring lines
+-- param: <name> <python type>    (optional parameter type override)
+-- column: <name> <python type>   (optional result column type override)
+SELECT ...;
 ```
 
-- **`name`** — a valid Python identifier (cannot be a Python keyword) that becomes the name of the generated function.
-- **`cardinality`** — one of `:one`, `:many`, or `:exec`.
+- **`function_name`** — a valid Python identifier (cannot be a Python keyword) that becomes the name of the generated function.
+- **`command`** — one of `:one`, `:many`, `:exec`, `:execrows`, `:execlastid`, or `:execmany`.
 
-The three cardinality values map to the `QueryCardinality` enum in `src/query.rs` [[9]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L12-L26):
+The six command values map to different execution patterns [[9]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/queryfile.rs):
 
-| Annotation | Enum variant | Generated behavior |
-|---|---|---|
-| `:one` | `QueryCardinality::One` | `fetchone()` → `Optional[XxxRow]` |
-| `:many` | `QueryCardinality::Many` | `fetchall()` → `list[XxxRow]` |
-| `:exec` | `QueryCardinality::Exec` | no fetch → `None` |
+| Command | Generated behavior |
+|---|---|
+| `:one` | `execute()` + `fetchone()` → `<Name>Row \| None` |
+| `:many` | `execute()` + `fetchall()` → `list[<Name>Row]` |
+| `:exec` | `execute()` per statement → `None` (no fetch) |
+| `:execrows` | `execute()` → `int` (`cursor.rowcount`) |
+| `:execlastid` | `execute()` → `int \| None` (`cursor.lastrowid`) |
+| `:execmany` | `executemany()` → `int` (`cursor.rowcount`), takes `rows: Iterable[<Name>Params]` |
 
-A blank line between the annotation comment and the SQL statement is allowed and does not break the association. Statements without an annotation comment are warned about and skipped entirely [[10]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/main.rs#L139-L148).
+**Special rules:**
+
+- `:exec` is the only command that may contain **multiple statements** (e.g., `CREATE TABLE` + several `CREATE INDEX`). Multi-statement `:exec` queries must use named placeholders.
+- Statements before the first `-- name:` header may only be schema statements (`CREATE TABLE`, `CREATE INDEX`, ...). They are parsed to populate the schema and generate nothing.
 
 #### Example
 
-From `example/sqlite/queries/main.sql` [[11]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/example/sqlite/queries/main.sql#L1-L18):
+From `example/aiosqlite/sql/butter/ticket.sql` [[11]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/example/aiosqlite/sql/butter/ticket.sql):
 
 ```sql
--- get_user_by_id :one
-SELECT id AS user_id, email, created_at
-FROM users
-WHERE id = :id;
+-- name: create_table_ticket :exec
+CREATE TABLE IF NOT EXISTS ticket (
+    reference TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    label TEXT,
+    status TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_status ON ticket (status);
 
--- get_orders_with_items :many
-SELECT o.order_id, o.status, oi.product_id, oi.quantity
-FROM orders o
-JOIN order_items oi ON o.order_id = oi.order_id
-WHERE o.customer_id = :customer_id;
+-- name: select_many_ticket_by_status :many
+SELECT *
+FROM ticket
+WHERE status = :status;
 
--- create_user :exec
-INSERT INTO users (email, created_at)
-VALUES (:email, datetime('now'));
+-- name: upsert_many_ticket :execmany
+-- Refreshes the label, reason and last-seen time of an existing ticket.
+INSERT INTO ticket (reference, label, reason, last_seen_at, active_since, status)
+VALUES (:reference, :label, :reason, :last_seen_at, :active_since, :status)
+ON CONFLICT(reference) DO UPDATE SET
+    label = excluded.label,
+    reason = excluded.reason,
+    last_seen_at = excluded.last_seen_at;
 ```
 
-### The Annotation Pre-Pass
+### Header Extraction
 
-`extract_query_annotations()` in `src/query.rs` performs a line-by-line scan of the raw SQL text before the AST is involved [[8]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L154-L231). It:
+`parse_query_file()` in `src/queryfile.rs` performs a line-by-line scan of the raw SQL text [[8]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/queryfile.rs). It:
 
-1. Strips leading whitespace from each line.
-2. Skips blank lines.
-3. For comment lines (starting with `--`), attempts to parse `<name> :<cardinality>`. Valid annotations are held in `pending_annotation`.
-4. Detects statement boundaries at `;` and emits the pending annotation (or `None` if none was set) into the output `Vec`.
-5. Validates the annotation name: it must be a valid Python identifier and must not be a Python keyword; invalid names produce a warning and are skipped rather than hard-failing [[12]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L182-L213).
+1. Separates preamble schema statements (before the first `-- name:` header) from annotated query blocks.
+2. For each `-- name:` header, parses the function name and command, then collects subsequent comment lines into a docstring until the SQL statement begins.
+3. Extracts optional `-- param:` and `-- column:` type overrides from the header block.
+4. Detects statement boundaries at `;` and emits one query block per `-- name:` header.
 
-The resulting `Vec<Option<QueryAnnotation>>` is zipped with the sqlparser AST statements one-to-one in `src/main.rs` [[13]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/main.rs#L135-L163). This annotation logic was originally implemented in `src/main.rs` in [PR #1](https://github.com/brian-dlee/icantbelieveitsnotsql/pull/1) [[14]](https://github.com/brian-dlee/icantbelieveitsnotsql/pull/1) and later moved to `src/query.rs` as part of the module-split refactor in [PR #5](https://github.com/brian-dlee/icantbelieveitsnotsql/pull/5) [[15]](https://github.com/brian-dlee/icantbelieveitsnotsql/pull/5).
+The resulting `Vec<QueryBlock>` is then parsed and analyzed one block at a time.
 
 ### Placeholder Styles
 
-Three placeholder syntaxes are recognized [[16]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L39-L47):
+Named placeholders (`:name`, `@name`, `$name`) and anonymous `?` placeholders are recognized [[16]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/analyze.rs):
 
-| Style | Example | Normalized name | Parameter style emitted |
+| Style | Example | Python argument | Parameter binding |
 |---|---|---|---|
-| Named | `:id`, `:email` | `id`, `email` | `dict` (named) |
-| Dollar | `$1`, `$2` | `p1`, `p2` | `tuple` (positional) |
-| Anonymous | `?` | `p1`, `p2`, … (counted) | `tuple` (positional) |
+| Named | `:id`, `@email`, `$name` | keyword-only (`*, id: int, email: str`) | `dict` |
+| Anonymous | `?` | keyword-only, named after column or `param_N` | `tuple` |
 
-Placeholders are collected by recursively walking the sqlparser expression tree in `collect_placeholders()` [[17]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L238-L308), which handles `BinaryOp`, `UnaryOp`, `Between`, `InList`, `Like`, `Case`, `Function`, and more. Duplicate named placeholders are deduplicated; duplicate anonymous `?` placeholders each get their own positional slot [[18]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L314-L369).
+Numbered placeholders (`?1`, `?2`) are rejected. A single statement cannot mix named and anonymous styles.
+
+Placeholders are collected by recursively walking the sqlparser expression tree, handling `BinaryOp`, `UnaryOp`, `Between`, `InList`, `Like`, `Case`, `Function`, subqueries, and more. Duplicate named placeholders are deduplicated; duplicate `?` placeholders each get their own positional slot.
 
 ### Type Inference for Input Parameters
 
-For **named** (`:name`) placeholders, `resolve_param_type()` looks the parameter name up against the active tables' column definitions in the parsed schema [[19]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L371-L391). If exactly one match is found, `sql_type_to_python()` converts the SQL type to a Python type annotation [[20]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L397-L460):
+Parameter types are inferred from the surrounding SQL context [[19]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/analyze.rs):
 
-| SQL types | Python type |
+| Context | Inferred type |
 |---|---|
-| `INTEGER`, `INT`, `BIGINT`, `SMALLINT`, … | `int` |
-| `TEXT`, `VARCHAR`, `CHAR`, `CHARACTER VARYING`, … | `str` |
-| `REAL`, `FLOAT`, `DOUBLE`, `DOUBLE PRECISION`, … | `float` |
-| `BOOLEAN`, `BOOL` | `bool` |
-| `BLOB`, `BYTEA`, `BINARY`, `VARBINARY`, … | `bytes` |
-| `NUMERIC`, `DECIMAL`, `DEC`, `MONEY`, … | `Decimal` |
-| `DATE` | `datetime.date` |
-| `TIME`, `TIMETZ`, `TIME WITH TIME ZONE` | `datetime.time` |
-| `TIMESTAMP`, `TIMESTAMPTZ`, `DATETIME`, … | `datetime.datetime` |
-| `UUID` | `str` |
-| `JSON`, `JSONB` | `Any` |
+| `WHERE col = :p`, `col IN (:p)`, `BETWEEN :a AND :b` | type of `col`, not nullable |
+| `(:p IS NULL OR col = :p)` | type of `col`, nullable (default `None`) |
+| `INSERT ... VALUES (:p)`, `SET col = :p` | type and nullability of `col` |
+| `LIMIT :p`, `OFFSET :p` | `int` |
+| `datetime('now', :p)`, `lower(:p)`, function arguments | per-function table (e.g., `str` for `datetime` modifiers) |
+| anything else | `typing.Any` (with a warning) |
 
-If no column match is found, the name matches multiple tables (ambiguous), or the placeholder is positional (`?` / `$N`), the type falls back to `Any`.
+Type resolution follows SQLite's affinity rules [[20]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/analyze.rs):
+
+| SQL type | Python type |
+|---|---|
+| `INTEGER`, `INT`, `BIGINT`, `SMALLINT`, … (`*INT*`) | `int` |
+| `REAL`, `FLOAT`, `DOUBLE` | `float` |
+| `NUMERIC`, `DECIMAL` | `float` |
+| `TEXT`, `VARCHAR`, `CHAR`, `CLOB` | `str` |
+| `BLOB`, or no declared type | `bytes` |
+| `BOOLEAN` | `bool` |
+| `DATE` / `TIME` / `DATETIME`, `TIMESTAMP` | `datetime.date` / `datetime.time` / `datetime.datetime` |
+| `JSON` | `str` |
+
+`NOT NULL` and `PRIMARY KEY` columns produce non-optional parameters; all others get `| None`. Column-specific and SQL-type overrides from `butter.toml` apply to both parameters and result columns.
 
 ### Output Field Resolution
 
-For `SELECT` queries, each item in the projection is resolved back to its source table and column so it can be used in the generated row dataclass. Unqualified column names (e.g., `email`) are looked up across all active tables [[21]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L546-L581). If the column appears in more than one table an `AmbiguousFieldReference` error is raised; if it appears in none an `InvalidFieldReference` error is raised. Fully qualified column references (`table.column`) resolve directly. `AS` aliases are used as the generated Python field name.
+For `SELECT` queries, each item in the projection is resolved through [[21]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/analyze.rs):
+
+- `*` and `alias.*` expansion from the schema
+- Column resolution: unqualified names are looked up across active tables; ambiguous names raise an error
+- Expression type inference: a table of SQLite functions (`COUNT` → `int`, `MAX(col)` → nullable type of `col`, `COALESCE`, `CASE`, `||`, arithmetic, `CAST`, ...)
+- Join nullability: columns from the outer side of a `LEFT`/`RIGHT`/`FULL JOIN` become nullable
+- CTE, derived table, `UNION`, subquery, and `RETURNING` clause resolution
+
+Unaliased expressions are exposed as `column_N` with a warning; alias them with `AS`. Rows are mapped by position, so SQL column names need not be valid Python identifiers.
 
 ## Code Generation
 
-Python code is generated by `generate_python_file()` in `src/codegen/python.rs` [[22]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L78-L257). Each `.sql` input file produces exactly one `.py` output file with the same stem (e.g., `queries/main.sql` → `generated/main.py`).
+Python code is generated by `render_module()` in `src/python.rs` [[22]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs). Each `.sql` input file produces exactly one `.py` output file with the same stem (e.g., `sql/butter/ticket.sql` → `app/butter/ticket.py`).
 
 ### File Structure
 
-Every generated file follows this layout [[23]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L121-L152):
+Every generated file follows this layout [[23]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs):
 
 ```python
-# GENERATED BY icantbelieveitsnotsql -- DO NOT EDIT
-# Source: main.sql
+# Code generated by butter. DO NOT EDIT.
+# Source: sql/butter/ticket.sql
 
-from __future__ import annotations
+import typing
 
-import dataclasses
-import datetime           # only if datetime types are needed
-from decimal import Decimal  # only if Decimal types are needed
-from typing import Any, Optional, Protocol
+import aiosqlite
+import pydantic
+
+import app.types  # only if custom column types are imported
 
 
-class _Cursor(Protocol):
-    def execute(self, sql: str, parameters: Any = ...) -> Any: ...
-    def fetchone(self) -> tuple[Any, ...] | None: ...
-    def fetchall(self) -> list[tuple[Any, ...]]: ...
+def _row_dict(model: type[pydantic.BaseModel], row: typing.Sequence[object]) -> dict[str, object]:
+    """Maps a result row onto the model's fields by position, so unaliased expressions work."""
+    return dict(zip(model.model_fields, row, strict=True))
 
 # ... one block per annotated query ...
 ```
 
-The `_Cursor` Protocol is the only structural type the generated code requires from the caller — any database cursor that implements `execute`, `fetchone`, and `fetchall` is compatible. This keeps the generated module usable with any DB-API 2.0-compliant driver. The stdlib imports (`datetime`, `Decimal`) are only emitted when the inferred parameter types actually need them [[24]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L65-L75). No third-party packages are ever imported.
+The `_row_dict` helper is only emitted when the file contains at least one `:one` or `:many` query (i.e., queries that return rows). Custom type imports (from `column-types` overrides) are added to the import block as needed. The generated code depends on `aiosqlite` and `pydantic`, and optionally on your custom types.
 
 ### Per-Query Block
 
-For each annotated query the generator emits three to four elements [[25]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L154-L251):
+For each annotated query the generator emits three to four elements [[25]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs):
 
-**1. SQL constant**
+**1. SQL constant(s)**
 
-The SQL statement is serialized back from the AST (trailing semicolons stripped) into a triple-quoted string constant. The name is the query name converted to `SCREAMING_SNAKE_CASE` prefixed with `_` and suffixed with `_SQL`:
+For single-statement queries, the SQL is emitted as a module constant in `SCREAMING_SNAKE_CASE`:
 
 ```python
-_GET_USER_BY_ID_SQL = """
-SELECT id AS user_id, email, created_at FROM users WHERE id = :id
+SELECT_MANY_TICKET_BY_STATUS = """
+SELECT *
+FROM ticket
+WHERE status = :status
 """
 ```
 
-**2. Row dataclass** (`:one` and `:many` only)
-
-A `@dataclasses.dataclass` named `{PascalCase}Row` is emitted with one field per output column. Field names come from the SQL `AS` aliases or bare column names; Python keywords are escaped by appending `_`. Currently all output field types are annotated as `Any` [[26]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L300-L304):
+For multi-statement `:exec` queries, each statement becomes `<NAME>_1`, `<NAME>_2`, etc.:
 
 ```python
-@dataclasses.dataclass
-class GetUserByIdRow:
-    user_id: Any
-    email: Any
-    created_at: Any
+CREATE_TABLE_TICKET_1 = """CREATE TABLE IF NOT EXISTS ticket (...)"""
+CREATE_TABLE_TICKET_2 = """CREATE INDEX IF NOT EXISTS idx_ticket_status ON ticket (status)"""
 ```
 
-**3. Query function**
+**2. Row model** (`:one` and `:many` only)
 
-A typed function is emitted with `cursor: _Cursor` as the first parameter. If the query has input parameters, a bare `*` is inserted to make them keyword-only, followed by each parameter with its inferred Python type [[27]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L202-L217):
+A pydantic `BaseModel` subclass named `{PascalCase}Row` is emitted with one field per output column. Field names come from the SQL `AS` aliases or bare column names; Python keywords are escaped by appending `_`. Types are inferred from the schema and expression analysis [[26]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs):
 
 ```python
-def get_user_by_id(cursor: _Cursor, *, id: int) -> Optional[GetUserByIdRow]:
-    cursor.execute(_GET_USER_BY_ID_SQL, {"id": id})
-    row = cursor.fetchone()
-    if row is None:
-        return None
-    return GetUserByIdRow(
-        user_id=row[0],
-        email=row[1],
-        created_at=row[2],
-    )
+class SelectManyTicketByStatusRow(pydantic.BaseModel):
+    """One result row of `select_many_ticket_by_status`."""
+
+    reference: str
+    label: str | None
+    status: app.types.Status
 ```
+
+**3. Params model** (when the query has parameters)
+
+A pydantic `BaseModel` subclass named `{PascalCase}Params` is emitted with one field per parameter. Default values are `None` for optional parameters, `pydantic.Field(default=None)` for nullable columns:
+
+```python
+class SelectManyTicketByStatusParams(pydantic.BaseModel):
+    """Parameters of `select_many_ticket_by_status`."""
+
+    status: app.types.Status
+```
+
+**4. Async function**
+
+A typed async function is emitted with `cursor: aiosqlite.Cursor` as the first parameter. If the query has input parameters, a bare `*` is inserted to make them keyword-only (except for `:execmany`, which takes `rows: Iterable[<Name>Params]`). The function body constructs the params dict or tuple via `model_dump(by_alias=True)`, awaits `cursor.execute()`, and returns the appropriate result [[27]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs):
+
+```python
+async def select_many_ticket_by_status(
+    cursor: aiosqlite.Cursor,
+    *,
+    status: app.types.Status,
+) -> list[SelectManyTicketByStatusRow]:
+    """Runs `select_many_ticket_by_status`."""
+    params = SelectManyTicketByStatusParams(status=status).model_dump(by_alias=True)
+    await cursor.execute(SELECT_MANY_TICKET_BY_STATUS, params)
+    return [SelectManyTicketByStatusRow.model_validate(_row_dict(SelectManyTicketByStatusRow, row)) for row in await cursor.fetchall()]
+```
+
+Docstrings are populated from the `-- name:` header comment block, or default to `"Runs \`<name>\`."`.
 
 ### Parameter Binding Style
 
-The second argument to `cursor.execute()` depends on the placeholder style found in the original SQL [[28]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L263-L297):
+Parameters are serialized through the generated `<Name>Params` model [[28]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs):
 
-| Placeholder style | Execute call |
+| Placeholder style | Binding code |
 |---|---|
-| Named (`:name`) | `cursor.execute(SQL, {"name": name, ...})` |
-| Positional (`?` or `$1`) | `cursor.execute(SQL, (p1, p2, ...))` |
+| Named (`:name`, `@name`, `$name`) | `params = <Name>Params(...).model_dump(by_alias=True)` (dict) |
+| Anonymous (`?`) | `params = tuple(<Name>Params(...).model_dump(by_alias=True).values())` (tuple) |
 
-A single-element positional tuple is emitted with a trailing comma to avoid Python misinterpreting it as parenthesized expression (e.g., `(p1,)`).
+This ensures pydantic validators and serializers (e.g., enum conversions, timestamp formatting) run before values reach the database driver.
 
-### Fetch and Return Patterns per Cardinality
+### Fetch and Return Patterns per Command
 
-| Cardinality | Fetch call | Return type | Return value |
+| Command | Execution | Return type | Return value |
 |---|---|---|---|
-| `:exec` | none | `None` | implicit |
-| `:one` | `cursor.fetchone()` | `Optional[XxxRow]` | `None` or `XxxRow(field=row[i], ...)` |
-| `:many` | `cursor.fetchall()` | `list[XxxRow]` | list comprehension of `XxxRow` |
+| `:exec` | `await cursor.execute(...)` per statement | `None` | implicit |
+| `:execrows` | `await cursor.execute(...)` | `int` | `cursor.rowcount` |
+| `:execlastid` | `await cursor.execute(...)` | `int \| None` | `cursor.lastrowid` |
+| `:execmany` | `await cursor.executemany(...)` | `int` | `cursor.rowcount` |
+| `:one` | `await cursor.fetchone()` | `<Name>Row \| None` | `None` or validated model |
+| `:many` | `await cursor.fetchall()` | `list[<Name>Row]` | list comprehension of validated models |
 
-[[29]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L229-L251)
+[[29]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs)
 
 ### Duplicate Name Detection
 
-Before any code is written, `generate_python_file()` scans all query names and raises an `io::Error` if two queries in the same file would produce the same row class name [[30]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L83-L100). This prevents silent class shadowing in the output module.
+Before any code is written, `generate::run()` rejects duplicate query names within a file, which would otherwise produce identically named models [[30]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs). This prevents silent class shadowing in the output module.
 
 ## Example Project
 
-The `example/sqlite/` directory in the repository provides a complete, runnable illustration of the full pipeline [[31]](https://github.com/brian-dlee/icantbelieveitsnotsql/pull/6).
+The `example/aiosqlite/` directory in the repository provides a complete, runnable illustration of the full pipeline [[31]](https://github.com/brian-dlee/icantbelieveitsnotsql/tree/HEAD/example/aiosqlite).
 
 ### Directory Layout
 
 ```
-example/sqlite/
-├── butter.toml          # generator configuration
-├── schema.sql           # DDL for all tables
-├── queries/
-│   └── main.sql         # annotated SQL queries
-├── generated/
-│   └── main.py          # generated Python module (committed for reference)
-└── smoke_test.py        # end-to-end verification script
+example/aiosqlite/
+├── butter.toml              # generator configuration
+├── sql/butter/
+│   ├── cache_entry.sql      # CREATE TABLE + queries
+│   ├── membership.sql
+│   ├── tag.sql
+│   └── ticket.sql
+├── app/
+│   ├── types.py             # custom Status enum, SqlUtcTimestamp type
+│   └── butter/              # generated modules
+│       ├── __init__.py
+│       ├── cache_entry.py
+│       ├── membership.py
+│       ├── tag.py
+│       └── ticket.py
+├── sample_butter_script.py  # demo usage
+└── tests/
+    └── test_butter.py       # pytest suite with 8 tests
 ```
 
-### `butter.toml` [[5]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/example/sqlite/butter.toml)
+### `butter.toml` [[5]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/example/aiosqlite/butter.toml)
 
 ```toml
 [generate]
 dialect = "sqlite"
-queries-dir = "./queries"
-schema-file = "schema.sql"
-output-dir = "./generated"
+queries-dir = "sql/butter"
+
+[generate.python]
+output-dir = "app/butter"
+driver = "aiosqlite"
+
+[generate.python.column-types]
+"ticket.status" = "app.types.Status"
+"ticket.last_seen_at" = "app.types.SqlUtcTimestamp"
+"ticket.active_since" = "app.types.SqlUtcTimestamp"
 ```
 
-### `queries/main.sql`
+### `sql/butter/ticket.sql`
 
-The query file contains eight annotated queries spanning all cardinality types and DML operations [[32]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/example/sqlite/queries/main.sql):
+The query file contains schema definitions, lifecycle management, and reads [[32]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/example/aiosqlite/sql/butter/ticket.sql):
 
 ```sql
--- get_user_by_id :one
-SELECT id AS user_id, email, created_at
-FROM users
-WHERE id = :id;
+-- name: create_table_ticket :exec
+CREATE TABLE IF NOT EXISTS ticket (
+    reference TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    label TEXT,
+    status TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_status ON ticket (status);
 
--- get_orders_with_items :many
-SELECT o.order_id, o.status, oi.product_id, oi.quantity
-FROM orders o
-JOIN order_items oi ON o.order_id = oi.order_id
-WHERE o.customer_id = :customer_id;
+-- name: select_many_ticket_by_status :many
+SELECT *
+FROM ticket
+WHERE status = :status;
 
--- create_user :exec
-INSERT INTO users (email, created_at)
-VALUES (:email, datetime('now'));
+-- name: upsert_many_ticket :execmany
+-- Refreshes the label, reason and last-seen time of an existing ticket.
+INSERT INTO ticket (reference, label, reason, last_seen_at, active_since, status)
+VALUES (:reference, :label, :reason, :last_seen_at, :active_since, :status)
+ON CONFLICT(reference) DO UPDATE SET
+    label = excluded.label,
+    reason = excluded.reason,
+    last_seen_at = excluded.last_seen_at;
 
--- update_user_email :exec
-UPDATE users
-SET email = :email
-WHERE id = :id;
-
--- delete_user :exec
-DELETE FROM users
-WHERE id = :id;
+-- name: archive_stale_ticket :execrows
+-- `duration` is a SQLite modifier such as '-7 days'.
+UPDATE ticket
+SET status = 'ARCHIVED', active_since = NULL
+WHERE last_seen_at < datetime('now', :duration);
 ```
-
-Each query uses the named placeholder style (`:name`), so the generated functions accept keyword arguments and pass a dict to `cursor.execute()`.
 
 ### Running the Example
 
 ```sh
-# From the repository root, regenerate the Python module:
-cargo run -- example/sqlite
-
-# Then run the smoke test (no dependencies beyond the Python stdlib):
-python example/sqlite/smoke_test.py
+cd example/aiosqlite
+butter generate
+uv run python sample_butter_script.py
+uv run pytest
 ```
 
-### `smoke_test.py`
+### `sample_butter_script.py`
 
-The smoke test [[33]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/example/sqlite/smoke_test.py) imports the generated `generated/main.py` module and runs a full CRUD cycle against an in-memory SQLite database:
+The sample script [[33]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/example/aiosqlite/sample_butter_script.py) demonstrates the generated async functions:
 
 ```python
-import sqlite3
-import main as queries  # the generated module
+import asyncio
+import aiosqlite
+from app.butter.cache_entry import (
+    InsertManyCacheEntryParams, create_table_cache_entry,
+    insert_many_cache_entry, select_many_cache_entry_by_key,
+)
 
-conn = sqlite3.connect(":memory:")
-# ... load schema.sql ...
-cursor = conn.cursor()
+async def main():
+    async with aiosqlite.connect(":memory:") as connection, connection.cursor() as cursor:
+        await create_table_cache_entry(cursor)
+        await insert_many_cache_entry(cursor, [InsertManyCacheEntryParams(key="greeting", value=b"...")])
+        rows = await select_many_cache_entry_by_key(cursor, key="greeting")
+        print(rows)
 
-# :exec — insert
-queries.create_user(cursor, email="alice@example.com")
-
-# :one — fetch with typed result
-result = queries.get_user_by_id(cursor, id=user_id)
-assert result is not None
-assert result.email == "alice@example.com"
-
-# :exec — update and delete
-queries.update_user_email(cursor, email="alice-new@example.com", id=user_id)
-queries.delete_user(cursor, id=user_id)
+asyncio.run(main())
 ```
 
-The test verifies that the generated code compiles, that `:one` queries return `None` for missing rows, and that mutation functions (`update_user_email`, `delete_user`) take effect correctly [[34]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/example/sqlite/smoke_test.py#L65-L135). Because the generated code has zero runtime dependencies, the only import needed is the Python standard library `sqlite3` module.
+### `tests/test_butter.py`
+
+The pytest suite [[34]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/example/aiosqlite/tests/test_butter.py) contains 8 tests exercising every generated function:
+
+- `:exec` queries that create tables
+- `:one` queries that return `None` for missing rows
+- `:many` queries with custom enum types (`Status`) and timestamps
+- `:execmany` queries (`insert_many_ticket`, `upsert_many_ticket`, `insert_many_ticket_ignore_conflicts`)
+- `:execrows` queries that return `cursor.rowcount` (`archive_stale_ticket`, `activate_recent_ticket`)
+- `LEFT JOIN` nullability, `ON CONFLICT` variants, aggregate functions
+- `aiosqlite.Row` compatibility (unaliased expressions mapped by position)
 
 ## Current Limitations
 
-`icantbelieveitsnotsql` is explicitly an early-stage tool (v0.1.0). The following constraints apply to the current implementation.
-
-### SELECT Query Support
-
-Only simple `SELECT … FROM … WHERE` statements are fully handled. When the query body is something other than a plain `SELECT` (e.g., `UNION`, `INTERSECT`, `VALUES`), the tool emits a warning and returns an empty result rather than failing hard [[35]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L476-L491):
-
-> Unsupported query type: only simple SELECT statements are supported (UNION, VALUES, etc. are not yet handled)
-
-### No Wildcard Projections
-
-`SELECT *` (and qualified wildcards like `table.*`) is explicitly rejected. The tool requires that every output column be listed explicitly so it can build a named row dataclass [[36]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L745-L749):
-
-```
-Unsupported expression: wildcard SELECT (*) is not supported; list columns explicitly
-```
-
-### Output Field Types Are Not Inferred
-
-While input parameter types are inferred from the schema, **output field types are not**. Every field in a generated row dataclass is typed as `Any`, regardless of what column type the schema declares [[26]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/codegen/python.rs#L300-L304):
-
-```rust
-fn output_field_python_type(_field: &QueryOutputField) -> &'static str {
-    // Currently falls back to Any — output fields don't carry data_type yet.
-    "Any"
-}
-```
-
-### Positional Placeholders Have No Type Inference
-
-Parameters using `?` (anonymous) or `$N` (dollar) placeholder styles cannot be matched against schema column types because the parameter name carries no semantic meaning. These always fall back to `Any` [[37]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/query.rs#L323-L355).
+`butter` focuses on SQLite and async Python for aiosqlite. The following constraints apply to the current implementation.
 
 ### Dialect Support
 
-Only four dialects are supported: `generic`, `sqlite`, `postgresql`, and `mysql`. Any other value is rejected at startup [[38]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/src/config.rs#L20-L27). In particular, CockroachDB is not supported. As the [README](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/209e58bf1ac2a1a27297a7bf039db909f5c34f55/README.md#L10) notes:
+Four dialects are supported for parsing: `generic`, `sqlite`, `postgresql`, and `mysql` [[35]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/dialect.rs). Only `sqlite` has full type inference; other dialects parse but produce `typing.Any` for most types with warnings. CockroachDB is not supported (sqlparser-rs does not include a CockroachDB dialect).
 
-> If CockroachDB support is required then I'll need a different parser. sqlparser-rs supports a lot of dialects but not CockroachDB.
+### Python and aiosqlite Only
 
-### Python-Only Output
+Only async Python for the `aiosqlite` driver is currently implemented [[36]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/python.rs). No synchronous drivers (e.g., `sqlite3`) or other languages are supported.
 
-Despite the tool's stated goal of supporting "any target application language," only Python code generation is currently implemented. The `src/codegen/` directory contains a single module, `python.rs` [[39]](https://github.com/brian-dlee/icantbelieveitsnotsql/tree/HEAD/src/codegen).
+### No Dynamic SQL
+
+`butter` generates one function per query variant. Dynamic `WHERE` clauses or optional filters require multiple named queries (e.g., `select_many_ticket`, `select_many_ticket_by_status`) or the `(:p IS NULL OR col = :p)` pattern for nullable parameters [[37]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/example/aiosqlite/sql/butter/ticket.sql).
+
+### Numbered Placeholders Rejected
+
+`?1`, `?2`, etc. (numbered positional placeholders) are not supported [[38]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/analyze.rs). Use `?` (anonymous) or named placeholders (`:name`, `@name`, `$name`).
+
+### `SELECT *` Depends on Schema Order
+
+Wildcard projections expand from the schema's declared column order. If the live database has a different order (e.g., due to `ALTER TABLE ADD COLUMN`), row mapping by position will break [[39]](https://github.com/brian-dlee/icantbelieveitsnotsql/blob/HEAD/src/analyze.rs). Explicit column lists avoid this.

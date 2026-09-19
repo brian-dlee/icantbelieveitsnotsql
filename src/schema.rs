@@ -1,85 +1,112 @@
-use sqlparser::ast::Statement;
-use sqlparser::dialect::Dialect;
-use sqlparser::parser::{Parser as SQLParser, ParserError};
-use std::collections::HashMap;
+//! Table definitions collected from `CREATE TABLE` / `CREATE VIEW` statements.
+
+use sqlparser::ast::{ColumnOption, CreateTable, Expr, ObjectName, ObjectNamePart, TableConstraint};
+
+use crate::types::{SqlType, TypeInfo};
 
 #[derive(Clone, Debug)]
-pub enum FieldSource {
-    TableSource {
-        database: Option<String>,
-        schema: Option<String>,
-        table: String,
-        column: String,
-        data_type: String,
-    },
+pub struct Column {
+    pub name: String,
+    pub type_info: TypeInfo,
+    /// `(table, column)` the value originates from, when it is a plain column reference.
+    pub source: Option<(String, String)>,
 }
 
-#[derive(Debug)]
-pub struct SchemaParseResult {
-    pub table_fields: HashMap<String, HashMap<String, String>>,
+impl Column {
+    pub fn new(name: impl Into<String>, type_info: TypeInfo) -> Column {
+        Column {
+            name: name.into(),
+            type_info,
+            source: None,
+        }
+    }
 }
 
-impl SchemaParseResult {
-    /// Search all tables in the schema for a column named `name`.
-    pub fn resolve_fields_by_name(&self, name: &str) -> Vec<FieldSource> {
-        self.resolve_fields_in_tables(name, &[])
+#[derive(Clone, Debug)]
+pub struct Table {
+    pub name: String,
+    pub columns: Vec<Column>,
+}
+
+impl Table {
+    pub fn column(&self, name: &str) -> Option<&Column> {
+        self.columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Schema {
+    pub tables: Vec<Table>,
+}
+
+/// Last identifier of a possibly qualified name (`main.users` -> `users`).
+pub fn object_name_last(name: &ObjectName) -> String {
+    name.0
+        .iter()
+        .rev()
+        .find_map(|part| match part {
+            ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+            ObjectNamePart::Function(f) => Some(f.name.value.clone()),
+        })
+        .unwrap_or_default()
+}
+
+impl Schema {
+    pub fn table(&self, name: &str) -> Option<&Table> {
+        self.tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
     }
 
-    /// Search only the specified `tables` for a column named `name`.
-    /// If `tables` is empty the full schema is searched (same as
-    /// `resolve_fields_by_name`).
-    pub fn resolve_fields_in_tables(&self, name: &str, tables: &[&str]) -> Vec<FieldSource> {
-        let mut result: Vec<FieldSource> = Vec::new();
+    pub fn add_table(&mut self, table: Table) {
+        self.tables.retain(|t| !t.name.eq_ignore_ascii_case(&table.name));
+        self.tables.push(table);
+    }
 
-        for (table_name, table_fields) in &self.table_fields {
-            if !tables.is_empty() && !tables.contains(&table_name.as_str()) {
-                continue;
-            }
-            for (field_name, field_data_type) in table_fields {
-                if name == field_name {
-                    result.push(FieldSource::TableSource {
-                        database: None,
-                        schema: None,
-                        table: table_name.clone(),
-                        column: field_name.clone(),
-                        data_type: field_data_type.clone(),
-                    })
+    pub fn add_create_table(&mut self, create_table: &CreateTable) {
+        let table_name = object_name_last(&create_table.name);
+
+        let mut primary_key_columns: Vec<String> = Vec::new();
+        for constraint in &create_table.constraints {
+            if let TableConstraint::PrimaryKey { columns, .. } = constraint {
+                for index_column in columns {
+                    if let Expr::Identifier(ident) = &index_column.column.expr {
+                        primary_key_columns.push(ident.value.to_lowercase());
+                    }
                 }
             }
         }
 
-        result
-    }
-}
+        let mut columns = Vec::new();
+        for column_def in &create_table.columns {
+            let declared = column_def.data_type.to_string();
+            let sql_type = SqlType::from_data_type(&column_def.data_type);
 
-pub fn parse_schema_file(
-    schema_file_contents: &str,
-    parser_dialect: &dyn Dialect,
-) -> Result<SchemaParseResult, ParserError> {
-    match SQLParser::parse_sql(parser_dialect, schema_file_contents) {
-        Err(err) => Err(err),
-        Ok(ast) => {
-            let mut tables: HashMap<String, HashMap<String, String>> = HashMap::new();
-
-            for statement in ast {
-                match statement {
-                    Statement::CreateTable(create_table) => {
-                        let table_name = create_table.name.to_string();
-                        let mut columns: HashMap<String, String> = HashMap::new();
-
-                        for column in create_table.columns.iter() {
-                            columns.insert(column.name.value.clone(), column.data_type.to_string());
-                        }
-
-                        tables.insert(table_name, columns);
-                    }
+            let mut not_null = primary_key_columns.contains(&column_def.name.value.to_lowercase());
+            for option in &column_def.options {
+                match &option.option {
+                    ColumnOption::NotNull => not_null = true,
+                    ColumnOption::Unique { is_primary, .. } if *is_primary => not_null = true,
                     _ => {}
                 }
             }
 
-            Ok(SchemaParseResult {
-                table_fields: tables,
-            })
+            columns.push(Column {
+                name: column_def.name.value.clone(),
+                type_info: TypeInfo {
+                    sql_type,
+                    nullable: !not_null,
+                    declared: Some(declared),
+                },
+                source: Some((table_name.clone(), column_def.name.value.clone())),
+            });
         }
+
+        self.add_table(Table {
+            name: table_name,
+            columns,
+        });
     }
 }
