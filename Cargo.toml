@@ -1,9 +1,13 @@
 [package]
-name = "icantbelieveitsnotsql"
-version = "0.1.0"
+name = "butter"
+version = "0.2.0"
 edition = "2021"
+description = "Generate typed data-access code from plain SQL files, sqlc style."
+license = "MIT"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[[bin]]
+name = "butter"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.50", features = ["derive"] }

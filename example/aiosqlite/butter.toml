@@ -1,0 +1,26 @@
+# butter configuration for the aiosqlite sample project.
+#
+# Run `butter generate` in this directory. Every sql/butter/<name>.sql file
+# becomes app/butter/<name>.py.
+
+[generate]
+dialect = "sqlite"
+queries-dir = "sql/butter"
+# Tables are declared inside the query files (the `create_table_*` queries),
+# so no separate schema file is needed. You can still list some:
+# schema-files = ["sql/schema.sql"]
+
+[generate.python]
+output-dir = "app/butter"
+driver = "aiosqlite"
+
+# Python types for specific columns. Dotted names are imported by the
+# generated modules. `| None` is appended when the column is nullable.
+[generate.python.column-types]
+"ticket.status" = "app.types.Status"
+"ticket.last_seen_at" = "app.types.SqlUtcTimestamp"
+"ticket.active_since" = "app.types.SqlUtcTimestamp"
+
+# Python types by declared SQL type, e.g. every DATETIME column:
+# [generate.python.sql-types]
+# "DATETIME" = "app.types.SqlUtcTimestamp"
