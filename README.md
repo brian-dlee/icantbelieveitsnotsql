@@ -79,13 +79,23 @@ The tables are learned from the `CREATE TABLE` statements butter sees, whether
 they live in a query file (as above, so the same file both creates and queries
 the table) or in separate files listed under `schema-files`.
 
-A complete, runnable sample lives in [`example/aiosqlite`](example/aiosqlite):
+A complete, runnable sample lives in [`example/aiosqlite`](example/aiosqlite)
+(its generated `app/butter/` is committed so it runs without the Rust toolchain):
 
 ```sh
 cd example/aiosqlite
 butter generate
 uv run python sample_butter_script.py
 uv run pytest
+```
+
+[`example/sqlite`](example/sqlite) exercises a wider range of SQLite DDL with a
+separate schema file; its output is not committed:
+
+```sh
+cd example/sqlite
+butter generate
+uv run python smoke_test.py
 ```
 
 ## Writing queries
@@ -115,6 +125,7 @@ SELECT ...;
 - `:execmany` takes `rows: Iterable[<Name>Params]` instead of keyword arguments.
 - Statements before the first `-- name:` header may only be schema statements
   (`CREATE TABLE`, `CREATE INDEX`, ...). They feed the analyzer and generate nothing.
+- The older two-word header `-- my_query :one` is still accepted.
 
 ### Parameters
 
@@ -190,6 +201,8 @@ your custom types run before values reach the driver.
 dialect = "sqlite"              # sqlite | postgresql | mysql | generic
 queries-dir = "sql/butter"      # every *.sql here becomes one module
 schema-files = ["schema.sql"]   # optional extra CREATE TABLE files
+
+# output-dir = "pkg/butter"    # older spelling; same as [generate.python] output-dir
 
 [generate.python]
 output-dir = "pkg/butter"       # receives <stem>.py per query file (+ __init__.py once)

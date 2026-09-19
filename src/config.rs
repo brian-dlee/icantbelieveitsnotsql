@@ -48,6 +48,10 @@ pub struct GenerateConfig {
     #[serde(rename = "schema-file")]
     pub schema_file: Option<PathBuf>,
 
+    /// Older configs put `output-dir` here; it means Python output with defaults.
+    #[serde(rename = "output-dir")]
+    pub output_dir: Option<PathBuf>,
+
     pub python: Option<PythonConfig>,
 }
 
@@ -75,6 +79,24 @@ impl Config {
             .map_err(|err| ButterError::Config(format!("{}: {}", path.display(), err)))?;
 
         Ok(config)
+    }
+
+    /// The Python section, or one synthesized from a top-level `output-dir`.
+    pub fn python(&self) -> Option<PythonConfig> {
+        if let Some(python) = &self.generate.python {
+            return Some(PythonConfig {
+                output_dir: python.output_dir.clone(),
+                driver: python.driver.clone(),
+                column_types: python.column_types.clone(),
+                sql_types: python.sql_types.clone(),
+            });
+        }
+        self.generate.output_dir.as_ref().map(|output_dir| PythonConfig {
+            output_dir: output_dir.clone(),
+            driver: default_driver(),
+            column_types: BTreeMap::new(),
+            sql_types: BTreeMap::new(),
+        })
     }
 
     pub fn schema_files(&self) -> Vec<PathBuf> {

@@ -369,6 +369,26 @@ CREATE TABLE b (y TEXT DEFAULT 'it''s; quoted');
 }
 
 #[test]
+fn query_file_accepts_legacy_header_style() {
+    let contents = "-- get_user :one\nSELECT 1;\n\n-- just a comment :) not a header\n-- name: other :exec\nSELECT 2;\n";
+    let blocks = parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].name.as_deref(), Some("get_user"));
+    assert_eq!(blocks[0].command, Some(Command::One));
+    assert_eq!(blocks[1].name.as_deref(), Some("other"));
+}
+
+#[test]
+fn top_level_output_dir_selects_python_output() {
+    let config = "[generate]\ndialect = \"sqlite\"\nqueries-dir = \"sql\"\noutput-dir = \"gen\"\n";
+    let queries = format!("{SCHEMA}\n-- get_user :one\nSELECT * FROM users WHERE id = :id;\n");
+    let project = TempProject::new("legacy", config, &[("sql/users.sql", &queries)]);
+    let report = crate::generate::run(&project.root, true).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(report.outputs.len(), 1);
+    assert!(project.root.join("gen/users.py").exists());
+}
+
+#[test]
 fn query_file_rejects_unknown_command() {
     let contents = "-- name: broken :fetch\nSELECT 1;\n";
     let err = parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap_err();

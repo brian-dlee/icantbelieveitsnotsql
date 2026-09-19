@@ -113,12 +113,13 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
     let dialect = SqlDialect::parse(&config.generate.dialect)?;
     let parser_dialect = dialect.parser_dialect();
 
-    let python_config = config.generate.python.as_ref().ok_or_else(|| {
+    let python_config = config.python().ok_or_else(|| {
         ButterError::Config(format!(
             "{}: add a [generate.python] section with `output-dir` to choose what to generate",
             config_path.display()
         ))
     })?;
+    let python_config = &python_config;
 
     if python_config.driver != "aiosqlite" {
         return Err(ButterError::Config(format!(

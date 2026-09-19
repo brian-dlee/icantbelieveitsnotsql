@@ -102,18 +102,33 @@ impl PendingBlock {
     }
 }
 
-/// Parses `-- name: <identifier> :<command>` headers.
+/// Parses `-- name: <identifier> :<command>` headers, and the older
+/// `-- <identifier> :<command>` spelling (exactly two words, the second
+/// starting with a colon).
 fn parse_header(line: &str) -> Option<(String, Option<Command>, String)> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix("--")?.trim_start();
-    let rest = rest.strip_prefix("name:")?.trim();
 
-    let mut parts = rest.split_whitespace();
-    let name = parts.next()?.to_string();
-    let command_text = parts.next().unwrap_or("").to_string();
-    let command = Command::parse(&command_text);
+    if let Some(rest) = rest.strip_prefix("name:") {
+        let mut parts = rest.trim().split_whitespace();
+        let name = parts.next()?.to_string();
+        let command_text = parts.next().unwrap_or("").to_string();
+        let command = Command::parse(&command_text);
+        return Some((name, command, command_text));
+    }
 
-    Some((name, command, command_text))
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if let [name, command_text] = parts[..] {
+        if is_identifier(name) && command_text.starts_with(':') {
+            return Some((
+                name.to_string(),
+                Command::parse(command_text),
+                command_text.to_string(),
+            ));
+        }
+    }
+
+    None
 }
 
 /// Parses `-- <key>: <name> <type...>` annotation lines.
