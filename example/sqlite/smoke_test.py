@@ -21,7 +21,7 @@ HERE = pathlib.Path(__file__).parent
 # Allow importing the generated module relative to this file's location.
 sys.path.insert(0, str(HERE / "generated"))
 
-import main as queries  # noqa: E402  (generated module)
+import main as queries  # generated module
 
 # Statements that some SQLite builds reject; skipping them keeps the smoke
 # test focused on the tables the queries use.
@@ -105,7 +105,7 @@ async def test_orders(cursor: aiosqlite.Cursor) -> None:
 
     assert await queries.delete_order_item(cursor, order_id=order_id, product_id=2) == 1
     assert len(await queries.get_orders_with_items(cursor, customer_id=7)) == 2
-    print(f"  ✓ create_order / create_order_item(s) / get_orders_with_items / delete_order_item")
+    print("  ✓ create_order / create_order_item(s) / get_orders_with_items / delete_order_item")
 
 
 async def test_accounts_and_rectangles(cursor: aiosqlite.Cursor) -> None:

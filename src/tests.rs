@@ -485,6 +485,18 @@ UPDATE users SET name = :name WHERE id = ?;
 }
 
 #[test]
+fn exec_only_module_has_no_unused_imports() {
+    let queries = format!("{SCHEMA}\n-- name: reset :exec\nDELETE FROM orders;\nDELETE FROM users;\n");
+    let project = TempProject::new("exec-only", CONFIG, &[("sql/reset.sql", &queries)]);
+    crate::generate::run(&project.root, true).unwrap_or_else(|e| panic!("{e}"));
+    let code = std::fs::read_to_string(project.root.join("out/reset.py")).unwrap();
+    assert!(code.contains("import aiosqlite\n"), "{code}");
+    assert!(!code.contains("import typing"), "{code}");
+    assert!(!code.contains("import pydantic"), "{code}");
+    assert!(!code.contains("_row_dict"), "{code}");
+}
+
+#[test]
 fn end_to_end_reports_errors_with_locations() {
     let queries = format!(
         "{SCHEMA}

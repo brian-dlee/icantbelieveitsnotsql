@@ -9,7 +9,8 @@ from app.butter import cache_entry, membership, tag, ticket
 from app.types import Status
 
 UTC = datetime.UTC
-NOW = datetime.datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
+# Derived from the runtime clock: `archive_stale_ticket` compares against SQLite's datetime('now').
+NOW = datetime.datetime.now(UTC).replace(microsecond=0)
 OLD = NOW - datetime.timedelta(days=30)
 
 
@@ -136,7 +137,7 @@ async def test_ticket_types_roundtrip(cursor):
 
     # The timestamp is stored in SQLite's own text format so datetime() comparisons work.
     await cursor.execute("SELECT last_seen_at FROM ticket")
-    assert (await cursor.fetchone())[0] == "2026-09-19 12:00:00"
+    assert (await cursor.fetchone())[0] == NOW.strftime("%Y-%m-%d %H:%M:%S")
 
 
 async def test_ticket_filters(cursor):

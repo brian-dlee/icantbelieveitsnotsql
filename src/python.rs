@@ -85,9 +85,7 @@ struct TypeResolver<'c> {
 impl<'c> TypeResolver<'c> {
     fn new(config: &'c PythonConfig) -> TypeResolver<'c> {
         let mut imports = BTreeSet::new();
-        imports.insert(String::from("typing"));
         imports.insert(String::from("aiosqlite"));
-        imports.insert(String::from("pydantic"));
         TypeResolver { config, imports }
     }
 
@@ -182,7 +180,10 @@ impl<'c> TypeResolver<'c> {
                 self.imports.insert(String::from("datetime"));
                 String::from("datetime.datetime")
             }
-            SqlType::Any => String::from("typing.Any"),
+            SqlType::Any => {
+                self.imports.insert(String::from("typing"));
+                String::from("typing.Any")
+            }
         }
     }
 }
@@ -416,6 +417,10 @@ pub fn render_module(module: &Module, config: &PythonConfig) -> Result<String, S
         });
     let mut body = String::new();
     let needs_row_helper = module.units.iter().any(|u| u.command.returns_rows());
+    if needs_row_helper {
+        resolver.imports.insert(String::from("typing"));
+        resolver.imports.insert(String::from("pydantic"));
+    }
 
     for unit in &module.units {
         if !is_python_identifier(&unit.name) || PYTHON_KEYWORDS.contains(&unit.name.as_str()) {
@@ -436,6 +441,13 @@ pub fn render_module(module: &Module, config: &PythonConfig) -> Result<String, S
             command_label(unit.command),
             if starts_with_class { "\n\n" } else { "\n" }
         ));
+
+        if unit.command.returns_rows() || !param_specs.is_empty() {
+            resolver.imports.insert(String::from("pydantic"));
+        }
+        if unit.command == Command::ExecMany {
+            resolver.imports.insert(String::from("typing"));
+        }
 
         if unit.command.returns_rows() {
             render_model(
