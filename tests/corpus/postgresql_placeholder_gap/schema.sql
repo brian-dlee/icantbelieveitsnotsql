@@ -1,0 +1,3 @@
+CREATE TABLE accounts (
+    id BIGSERIAL PRIMARY KEY
+);

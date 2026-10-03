@@ -31,11 +31,15 @@ impl SqlType {
 
         match base.as_str() {
             "BOOL" | "BOOLEAN" => return SqlType::Bool,
+            "SERIAL" | "SMALLSERIAL" | "BIGSERIAL" => return SqlType::Int,
             "DATE" => return SqlType::Date,
             "TIME" => return SqlType::Time,
             "DATETIME" | "TIMESTAMP" | "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE"
             | "TIMESTAMP WITHOUT TIME ZONE" => return SqlType::DateTime,
             "JSON" | "JSONB" => return SqlType::Json,
+            // PostgreSQL UUIDs and MySQL ENUM/SET values are represented as
+            // strings by the generated Python API unless a user overrides them.
+            "UUID" | "ENUM" | "SET" => return SqlType::Text,
             "" => return SqlType::Blob,
             _ => {}
         }
