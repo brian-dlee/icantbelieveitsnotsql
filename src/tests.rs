@@ -523,3 +523,126 @@ fn pascal_case_names() {
     assert_eq!(crate::python::pascal_case("select_many_ipinfo_by_ip"), "SelectManyIpinfoByIp");
     assert_eq!(crate::python::pascal_case("x"), "X");
 }
+
+// ---------------------------------------------------------- fixture corpus
+
+/// Each directory in tests/corpus is a standalone butter project. Successful
+/// cases keep generated Python under `expected/`; failing cases keep the
+/// expected diagnostic text in `expected-error.txt`.
+#[test]
+fn sql_corpus_matches_expected_results() {
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    let mut cases: Vec<_> = std::fs::read_dir(&corpus)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", corpus.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    cases.sort();
+
+    assert!(!cases.is_empty(), "the SQL fixture corpus has no cases");
+    for case in cases {
+        run_corpus_case(&case);
+    }
+}
+
+fn run_corpus_case(case: &std::path::Path) {
+    let name = case.file_name().unwrap().to_string_lossy();
+    let root = std::env::temp_dir().join(format!(
+        "butter-corpus-{}-{name}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    copy_fixture_inputs(case, case, &root);
+
+    let result = crate::generate::run(&root, true);
+    let expected_error = case.join("expected-error.txt");
+    if expected_error.exists() {
+        let expected = std::fs::read_to_string(&expected_error).unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains(expected.trim()),
+            "fixture {name}: expected diagnostic containing {:?}, got:\n{error}",
+            expected.trim()
+        );
+    } else {
+        let report = result.unwrap_or_else(|error| panic!("fixture {name}: {error}"));
+        compare_fixture_tree(&case.join("expected"), &root.join("out"), &name);
+        let expected_warnings = case.join("expected-warnings.txt");
+        if expected_warnings.exists() {
+            let expected = std::fs::read_to_string(expected_warnings).unwrap();
+            let actual = report
+                .warnings
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if expected.trim().is_empty() {
+                assert!(actual.is_empty(), "fixture {name}: unexpected warnings: {actual:?}");
+            } else {
+                let actual_text = actual.join("\n");
+                for expected_warning in expected.lines().filter(|line| !line.trim().is_empty()) {
+                    assert!(
+                        actual_text.contains(expected_warning.trim()),
+                        "fixture {name}: expected warning containing {:?}, got:\n{actual_text}",
+                        expected_warning.trim()
+                    );
+                }
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn copy_fixture_inputs(case: &std::path::Path, source: &std::path::Path, destination: &std::path::Path) {
+    for entry in std::fs::read_dir(source).unwrap() {
+        let path = entry.unwrap().path();
+        let relative = path.strip_prefix(case).unwrap();
+        if relative == std::path::Path::new("expected")
+            || relative == std::path::Path::new("expected-error.txt")
+            || relative == std::path::Path::new("expected-warnings.txt")
+        {
+            continue;
+        }
+        let target = destination.join(relative);
+        if path.is_dir() {
+            std::fs::create_dir_all(&target).unwrap();
+            copy_fixture_inputs(case, &path, destination);
+        } else {
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(path, target).unwrap();
+        }
+    }
+}
+
+fn compare_fixture_tree(expected: &std::path::Path, actual: &std::path::Path, name: &str) {
+    let mut expected_files = fixture_files(expected);
+    let mut actual_files = fixture_files(actual);
+    expected_files.sort();
+    actual_files.sort();
+    assert_eq!(actual_files, expected_files, "fixture {name}: generated file list differs");
+    for relative in expected_files {
+        let expected_text = std::fs::read_to_string(expected.join(&relative)).unwrap();
+        let actual_text = std::fs::read_to_string(actual.join(&relative)).unwrap();
+        assert_eq!(actual_text, expected_text, "fixture {name}: {} differs", relative.display());
+    }
+}
+
+fn fixture_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    if !root.exists() {
+        return Vec::new();
+    }
+    fixture_files_from(root, root)
+}
+
+fn fixture_files_from(root: &std::path::Path, current: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(current).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(fixture_files_from(root, &path));
+        } else {
+            files.push(path.strip_prefix(root).unwrap().to_path_buf());
+        }
+    }
+    files
+}

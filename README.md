@@ -130,6 +130,12 @@ SELECT ...;
 ### Parameters
 
 Named placeholders (`:name`, `@name`, `$name`) become keyword-only arguments.
+PostgreSQL supports numbered positional placeholders (`$1`, `$2`, ...) in
+addition to named dollar placeholders: `$N` may be reused (e.g., `$1` appears
+multiple times) and must form a dense 1-based sequence (no gaps). You cannot
+mix `?` and `$N`, nor can you mix positional (`?` or `$N`) and named
+placeholders in the same statement.
+
 `?` placeholders are bound by position and named after the column they are
 compared with or assigned to (`WHERE key = ?` → `key`), falling back to
 `param_1`, `param_2`, .... A statement cannot mix the two styles.
@@ -166,9 +172,12 @@ Declared SQL types follow SQLite's affinity rules:
 | SQL type                                     | Python type          |
 | -------------------------------------------- | -------------------- |
 | `INTEGER`, `INT`, `BIGINT`, ... (`*INT*`)    | `int`                |
+| `SERIAL`, `SMALLSERIAL`, `BIGSERIAL` (PostgreSQL) | `int`           |
 | `REAL`, `FLOAT`, `DOUBLE`                    | `float`              |
 | `NUMERIC`, `DECIMAL`                         | `float`              |
 | `TEXT`, `VARCHAR`, `CHAR`, `CLOB`            | `str`                |
+| `UUID` (PostgreSQL)                          | `str`                |
+| `ENUM`, `SET` (MySQL)                        | `str`                |
 | `BLOB`, or no declared type                  | `bytes`              |
 | `BOOLEAN`                                    | `bool`               |
 | `DATE` / `TIME` / `DATETIME`, `TIMESTAMP`    | `datetime.date` / `datetime.time` / `datetime.datetime` |
@@ -240,3 +249,8 @@ functions, `"double quoted"` string literals) go to stderr.
   `..._ignore_conflicts`) or use `(:p IS NULL OR col = :p)`.
 - Numbered `?NNN` placeholders are rejected.
 - `SELECT *` depends on the declared column order matching the live database.
+
+### MySQL-specific notes
+
+MySQL's `VALUES(column)` function in `ON DUPLICATE KEY UPDATE` clauses is
+properly typed: it refers to the value proposed by the `INSERT` for that column.

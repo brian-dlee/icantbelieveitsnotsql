@@ -190,6 +190,13 @@ fn is_placeholder(expr: &Expr) -> bool {
     )
 }
 
+fn numbered_dollar_placeholder(token: &str) -> Option<usize> {
+    token
+        .strip_prefix('$')
+        .filter(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|suffix| suffix.parse().ok())
+}
+
 /// Name to suggest for a `?` placeholder compared with this expression.
 fn column_hint(expr: &Expr) -> Option<String> {
     match expr {
@@ -380,17 +387,81 @@ impl<'s> Analyzer<'s> {
             ));
         }
 
-        let positional = raws.iter().any(|p| p.token == "?");
-        let named = raws.iter().any(|p| p.token != "?");
+        let has_question = raws.iter().any(|p| p.token == "?");
+        let has_numbered_dollar = raws
+            .iter()
+            .any(|p| numbered_dollar_placeholder(&p.token).is_some());
+        let positional = has_question || has_numbered_dollar;
+        let named = raws
+            .iter()
+            .any(|p| p.token != "?" && numbered_dollar_placeholder(&p.token).is_none());
         if positional && named {
             return Err(String::from(
-                "cannot mix `?` and named placeholders in one statement",
+                "cannot mix positional (`?` or `$N`) and named placeholders in one statement",
+            ));
+        }
+        if has_question && has_numbered_dollar {
+            return Err(String::from(
+                "cannot mix `?` and numbered `$N` placeholders in one statement",
             ));
         }
 
         let mut params: Vec<Param> = Vec::new();
 
-        if positional {
+        if has_numbered_dollar {
+            // PostgreSQL reuses `$N` references and binds arguments by their
+            // explicit number. Coalesce repeated references before creating
+            // function parameters, then require a dense 1-based sequence so
+            // the generated positional tuple has the same shape as the SQL.
+            let mut unique: Vec<RawParam> = Vec::new();
+            for raw in raws {
+                if let Some(existing) = unique.iter_mut().find(|p| p.token == raw.token) {
+                    if existing.type_info.is_none() {
+                        existing.type_info = raw.type_info;
+                        existing.source = raw.source;
+                    }
+                    existing.nullable_hint |= raw.nullable_hint;
+                    if existing.hint.is_none() {
+                        existing.hint = raw.hint;
+                    }
+                } else {
+                    unique.push(raw);
+                }
+            }
+            unique.sort_by_key(|p| numbered_dollar_placeholder(&p.token).unwrap());
+            for (index, raw) in unique.iter().enumerate() {
+                let number = numbered_dollar_placeholder(&raw.token).unwrap();
+                if number != index + 1 {
+                    return Err(format!(
+                        "numbered placeholders must be contiguous from `$1`; expected `${}`, found `{}`",
+                        index + 1,
+                        raw.token
+                    ));
+                }
+            }
+
+            let mut used: HashSet<String> = HashSet::new();
+            for (index, raw) in unique.iter().enumerate() {
+                let base = raw
+                    .hint
+                    .as_deref()
+                    .filter(|h| is_identifier(h))
+                    .map(|h| h.to_lowercase())
+                    .unwrap_or_else(|| format!("param_{}", index + 1));
+                let mut name = base.clone();
+                let mut counter = 2;
+                while used.contains(&name) {
+                    name = format!("{}_{}", base, counter);
+                    counter += 1;
+                }
+                used.insert(name.clone());
+                params.push(Param {
+                    name,
+                    type_info: raw_type(raw),
+                    source: raw.source.clone(),
+                });
+            }
+        } else if positional {
             let mut used: HashSet<String> = HashSet::new();
             for (index, raw) in raws.iter().enumerate() {
                 let base = raw
@@ -1440,6 +1511,9 @@ impl<'s> Analyzer<'s> {
                 result.name = String::new();
                 result
             }
+            // MySQL's VALUES(column) in ON DUPLICATE KEY UPDATE refers to
+            // the value proposed by the INSERT for that column.
+            "values" => first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true)),
             "round" | "julianday" | "sqrt" | "power" | "pow" | "exp" | "ln" | "log" | "log10"
             | "log2" | "pi" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
             | "degrees" | "radians" | "trunc" | "ceil" | "ceiling" | "floor" | "mod" => {
