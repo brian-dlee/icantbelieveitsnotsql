@@ -184,6 +184,9 @@ Declared SQL types follow SQLite's affinity rules:
 | `JSON`                                       | `str`                |
 
 `NOT NULL` and `PRIMARY KEY` columns are non-optional; everything else gets `| None`.
+PostgreSQL array columns become nested `list[...]` annotations. Array elements
+remain optional because SQL arrays may contain `NULL`, independently of whether
+the array column itself is nullable.
 
 Project-wide overrides live in `butter.toml`. Dotted names are imported by the
 generated modules, so you can point at your own enums or `Annotated` types with

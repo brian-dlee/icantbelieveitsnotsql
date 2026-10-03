@@ -117,6 +117,27 @@ impl<'c> TypeResolver<'c> {
             .map(|(_, v)| v.clone())
     }
 
+    fn array_dimensions(declared: &str) -> usize {
+        let mut rest = declared.trim();
+        let mut dimensions = 0;
+        loop {
+            rest = rest.trim_end();
+            if !rest.ends_with(']') {
+                break;
+            }
+            let Some(open) = rest.rfind('[') else {
+                break;
+            };
+            let bound = &rest[open + 1..rest.len() - 1];
+            if !bound.is_empty() && !bound.chars().all(|c| c.is_ascii_digit()) {
+                break;
+            }
+            dimensions += 1;
+            rest = &rest[..open];
+        }
+        dimensions
+    }
+
     fn resolve(
         &mut self,
         type_info: &TypeInfo,
@@ -142,7 +163,8 @@ impl<'c> TypeResolver<'c> {
             }
         }
 
-        let base = match base {
+        let has_override = base.is_some();
+        let mut base = match base {
             Some(custom) => {
                 self.collect_imports(&custom);
                 custom
@@ -150,11 +172,26 @@ impl<'c> TypeResolver<'c> {
             None => self.default_type(type_info.sql_type),
         };
 
+        // PostgreSQL array elements can be NULL even when the array column is
+        // declared NOT NULL. Preserve each dimension in the generated Python
+        // annotation while keeping the column's own nullability separate.
+        if !has_override {
+            if let Some(declared) = &type_info.declared {
+                let dimensions = Self::array_dimensions(declared);
+                if dimensions > 0 {
+                    base.push_str(" | None");
+                    for _ in 0..dimensions {
+                        base = format!("list[{}]", base);
+                    }
+                }
+            }
+        }
+
         if type_info.sql_type == SqlType::Any && !source.is_some_and(|_| base != "typing.Any") {
             return base;
         }
 
-        if type_info.nullable && !base.contains("None") {
+        if type_info.nullable && !base.trim_end().ends_with("| None") {
             format!("{} | None", base)
         } else {
             base
