@@ -22,6 +22,8 @@ class FindAccountRow(pydantic.BaseModel):
     external_id: str
     email: str
     profile: str | None
+    tags: list[str | None] | None
+    score_matrix: list[list[int | None]]
 
 
 class FindAccountParams(pydantic.BaseModel):
@@ -29,12 +31,13 @@ class FindAccountParams(pydantic.BaseModel):
 
     email: str
     id: int
+    tags: list[str | None]
 
 
 FIND_ACCOUNT = """
-SELECT id, external_id, email, profile
+SELECT id, external_id, email, profile, tags, score_matrix
 FROM public.accounts
-WHERE id > $2 AND (email = $1 OR lower(email) = lower($1))
+WHERE id > $2 AND (email = $1 OR lower(email) = lower($1)) AND tags = $3
 """
 
 
@@ -43,9 +46,10 @@ async def find_account(
     *,
     email: str,
     id: int,
+    tags: list[str | None],
 ) -> FindAccountRow | None:
     """Runs `find_account`."""
-    params = tuple(FindAccountParams(email=email, id=id).model_dump(by_alias=True).values())
+    params = tuple(FindAccountParams(email=email, id=id, tags=tags).model_dump(by_alias=True).values())
     await cursor.execute(FIND_ACCOUNT, params)
     row = await cursor.fetchone()
     return FindAccountRow.model_validate(_row_dict(FindAccountRow, row)) if row is not None else None
