@@ -1368,6 +1368,22 @@ impl<'s> Analyzer<'s> {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
                 Ok(anonymous(SqlType::Text, l.type_info.nullable || r.type_info.nullable))
             }
+            Arrow | HashArrow => {
+                self.walk_expr(left, None, None, scope)?;
+                self.walk_expr(right, None, None, scope)?;
+                // JSON extraction can return SQL NULL when the requested
+                // key or path is absent, even when the source column is NOT NULL.
+                Ok(anonymous(SqlType::Json, true))
+            }
+            LongArrow | HashLongArrow => {
+                self.walk_expr(left, None, None, scope)?;
+                self.walk_expr(right, None, None, scope)?;
+                Ok(anonymous(SqlType::Text, true))
+            }
+            AtArrow | ArrowAt => {
+                self.walk_pair(left, right, scope, false)?;
+                Ok(anonymous(SqlType::Bool, false))
+            }
             _ => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
                 Ok(anonymous(SqlType::Any, l.type_info.nullable || r.type_info.nullable))
