@@ -20,7 +20,7 @@ class FindAccountRow(pydantic.BaseModel):
 
     id: int
     email: str
-    profile: str | None
+    profile: typing.Any | None
     status: str
     balance: float
 

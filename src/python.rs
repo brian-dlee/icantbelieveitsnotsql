@@ -202,7 +202,11 @@ impl<'c> TypeResolver<'c> {
         match sql_type {
             SqlType::Int => String::from("int"),
             SqlType::Float | SqlType::Numeric => String::from("float"),
-            SqlType::Text | SqlType::Json => String::from("str"),
+            SqlType::Text => String::from("str"),
+            SqlType::Json | SqlType::Any => {
+                self.imports.insert(String::from("typing"));
+                String::from("typing.Any")
+            }
             SqlType::Blob => String::from("bytes"),
             SqlType::Bool => String::from("bool"),
             SqlType::Date => {
@@ -216,10 +220,6 @@ impl<'c> TypeResolver<'c> {
             SqlType::DateTime => {
                 self.imports.insert(String::from("datetime"));
                 String::from("datetime.datetime")
-            }
-            SqlType::Any => {
-                self.imports.insert(String::from("typing"));
-                String::from("typing.Any")
             }
         }
     }

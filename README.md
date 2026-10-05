@@ -181,7 +181,7 @@ Declared SQL types follow SQLite's affinity rules:
 | `BLOB`, or no declared type                  | `bytes`              |
 | `BOOLEAN`                                    | `bool`               |
 | `DATE` / `TIME` / `DATETIME`, `TIMESTAMP`    | `datetime.date` / `datetime.time` / `datetime.datetime` |
-| `JSON`                                       | `str`                |
+| `JSON`                                       | `typing.Any`         |
 
 `NOT NULL` and `PRIMARY KEY` columns are non-optional; everything else gets `| None`.
 PostgreSQL array columns become nested `list[...]` annotations. Array elements
