@@ -228,7 +228,7 @@ Type resolution follows SQLite's affinity rules [[20]](https://github.com/brian-
 | `BLOB`, or no declared type | `bytes` |
 | `BOOLEAN` | `bool` |
 | `DATE` / `TIME` / `DATETIME`, `TIMESTAMP` | `datetime.date` / `datetime.time` / `datetime.datetime` |
-| `JSON` | `str` |
+| `JSON` | `typing.Any` |
 
 `NOT NULL` and `PRIMARY KEY` columns produce non-optional parameters; all others get `| None`. Column-specific and SQL-type overrides from `butter.toml` apply to both parameters and result columns.
 

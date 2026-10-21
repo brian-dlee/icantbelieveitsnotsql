@@ -21,7 +21,7 @@ class FindAccountRow(pydantic.BaseModel):
     id: int
     external_id: str
     email: str
-    profile: str | None
+    profile: typing.Any | None
     tags: list[str | None] | None
     score_matrix: list[list[int | None]]
 
