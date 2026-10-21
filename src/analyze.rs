@@ -1516,6 +1516,12 @@ impl<'s> Analyzer<'s> {
             | "jsonb_array_length" | "json_valid" => {
                 anonymous(SqlType::Int, any_nullable)
             }
+            "cardinality" | "array_ndims" => anonymous(SqlType::Int, any_nullable),
+            "array_length" | "array_lower" | "array_upper" | "array_position" => {
+                // These can return SQL NULL for missing dimensions or values,
+                // even when the array input itself is non-null.
+                anonymous(SqlType::Int, true)
+            }
             "lower" | "upper" | "trim" | "ltrim" | "rtrim" | "substr" | "substring" | "replace"
             | "hex" | "printf" | "format" | "char" | "soundex" | "json_type" | "json_typeof"
             | "jsonb_typeof"
@@ -1630,6 +1636,8 @@ fn function_arg_expectation(
         "length" | "lower" | "upper" | "trim" | "ltrim" | "rtrim" | "replace" | "hex" | "unhex"
         | "quote" | "printf" | "format" | "concat" | "concat_ws" | "like" | "glob" | "instr"
         | "json" | "json_extract" | "json_valid" | "json_type" | "json_array_length" => text(),
+        "array_length" | "array_lower" | "array_upper" if index == 1 => int(),
+        "array_position" if index == 2 => int(),
         "substr" | "substring" => {
             if index == 0 {
                 text()
