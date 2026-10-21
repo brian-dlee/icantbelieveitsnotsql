@@ -49,7 +49,9 @@ SELECT
     profile @> '{}'::jsonb AS contains_empty_object,
     '{}'::jsonb <@ profile AS contained_by_profile,
     jsonb_typeof(profile) AS profile_type,
-    jsonb_array_length(profile) AS profile_array_length,
+    CASE
+        WHEN jsonb_typeof(profile) = 'array' THEN jsonb_array_length(profile)
+    END AS profile_array_length,
     jsonb_pretty(profile) AS profile_pretty,
     jsonb_typeof('null'::jsonb) AS json_type,
     jsonb_array_length('[]'::jsonb) AS array_length,
