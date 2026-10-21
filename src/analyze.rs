@@ -1381,8 +1381,11 @@ impl<'s> Analyzer<'s> {
                 Ok(anonymous(SqlType::Text, true))
             }
             AtArrow | ArrowAt => {
-                self.walk_pair(left, right, scope, false)?;
-                Ok(anonymous(SqlType::Bool, false))
+                let (l, r) = self.walk_pair(left, right, scope, false)?;
+                Ok(anonymous(
+                    SqlType::Bool,
+                    l.type_info.nullable || r.type_info.nullable,
+                ))
             }
             _ => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
