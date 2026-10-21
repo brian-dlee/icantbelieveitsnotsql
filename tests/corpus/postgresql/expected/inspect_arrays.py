@@ -20,6 +20,9 @@ class InspectArraysRow(pydantic.BaseModel):
 
     tag_count: int | None
     matrix_count: int
+    first_tag: str | None
+    score_cell: int | None
+    indexed_tag: str | None
     empty_array_dimensions: int | None
     missing_dimension_length: int | None
     requested_dimension_length: int | None
@@ -32,14 +35,19 @@ class InspectArraysRow(pydantic.BaseModel):
 class InspectArraysParams(pydantic.BaseModel):
     """Parameters of `inspect_arrays`."""
 
+    tag_index: int
     dimension: int
     start_position: int
+    tag_value: str
 
 
 INSPECT_ARRAYS = """
 SELECT
     cardinality(tags) AS tag_count,
     cardinality(score_matrix) AS matrix_count,
+    tags[1] AS first_tag,
+    score_matrix[1][2] AS score_cell,
+    tags[$tag_index] AS indexed_tag,
     array_ndims('{}'::integer[]) AS empty_array_dimensions,
     array_length('{1,2,3}'::integer[], 2) AS missing_dimension_length,
     array_length(score_matrix, :dimension) AS requested_dimension_length,
@@ -48,16 +56,19 @@ SELECT
     array_position('{red,green}'::text[], 'blue') AS missing_item_position,
     array_position('{red,green}'::text[], 'green', :start_position) AS starting_position
 FROM public.accounts
+WHERE tags[$tag_index] = $tag_value
 """
 
 
 async def inspect_arrays(
     cursor: aiosqlite.Cursor,
     *,
+    tag_index: int,
     dimension: int,
     start_position: int,
+    tag_value: str,
 ) -> list[InspectArraysRow]:
     """Runs `inspect_arrays`."""
-    params = InspectArraysParams(dimension=dimension, start_position=start_position).model_dump(by_alias=True)
+    params = InspectArraysParams(tag_index=tag_index, dimension=dimension, start_position=start_position, tag_value=tag_value).model_dump(by_alias=True)
     await cursor.execute(INSPECT_ARRAYS, params)
     return [InspectArraysRow.model_validate(_row_dict(InspectArraysRow, row)) for row in await cursor.fetchall()]
