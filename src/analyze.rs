@@ -1516,7 +1516,8 @@ impl<'s> Analyzer<'s> {
             | "jsonb_array_length" | "json_valid" => {
                 anonymous(SqlType::Int, any_nullable)
             }
-            "cardinality" | "array_ndims" => anonymous(SqlType::Int, any_nullable),
+            "cardinality" => anonymous(SqlType::Int, any_nullable),
+            "array_ndims" => anonymous(SqlType::Int, true),
             "array_length" | "array_lower" | "array_upper" | "array_position" => {
                 // These can return SQL NULL for missing dimensions or values,
                 // even when the array input itself is non-null.

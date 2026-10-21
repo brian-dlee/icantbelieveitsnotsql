@@ -2,7 +2,7 @@
 SELECT
     cardinality(tags) AS tag_count,
     cardinality(score_matrix) AS matrix_count,
-    array_ndims(score_matrix) AS matrix_dimensions,
+    array_ndims('{}'::integer[]) AS empty_array_dimensions,
     array_length('{1,2,3}'::integer[], 2) AS missing_dimension_length,
     array_length(score_matrix, :dimension) AS requested_dimension_length,
     array_lower('{}'::integer[], 1) AS empty_array_lower,
