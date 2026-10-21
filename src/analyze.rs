@@ -1512,11 +1512,14 @@ impl<'s> Analyzer<'s> {
                 result.name = String::new();
                 result
             }
-            "length" | "instr" | "unicode" | "octet_length" | "json_array_length" | "json_valid" => {
+            "length" | "instr" | "unicode" | "octet_length" | "json_array_length"
+            | "jsonb_array_length" | "json_valid" => {
                 anonymous(SqlType::Int, any_nullable)
             }
             "lower" | "upper" | "trim" | "ltrim" | "rtrim" | "substr" | "substring" | "replace"
-            | "hex" | "printf" | "format" | "char" | "soundex" | "json_type" | "json_quote"
+            | "hex" | "printf" | "format" | "char" | "soundex" | "json_type" | "json_typeof"
+            | "jsonb_typeof"
+            | "json_quote" | "json_pretty" | "jsonb_pretty"
             | "json" | "json_object" | "json_array" | "json_set" | "json_insert" | "json_replace"
             | "json_remove" | "json_patch" | "json_group_array" | "json_group_object" => {
                 anonymous(SqlType::Text, any_nullable)
@@ -1524,6 +1527,8 @@ impl<'s> Analyzer<'s> {
             "concat" | "concat_ws" | "quote" | "typeof" | "sqlite_version" | "sqlite_source_id" => {
                 anonymous(SqlType::Text, false)
             }
+            "json_extract_path" | "jsonb_extract_path" => anonymous(SqlType::Json, true),
+            "json_extract_path_text" | "jsonb_extract_path_text" => anonymous(SqlType::Text, true),
             "json_extract" | "->" | "->>" => anonymous(SqlType::Any, true),
             "abs" | "likely" | "unlikely" | "likelihood" => {
                 let mut result = first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true));
