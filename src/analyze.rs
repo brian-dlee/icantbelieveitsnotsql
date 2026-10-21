@@ -4,10 +4,10 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    Assignment, AssignmentTarget, BinaryOperator, Delete, Expr, FromTable, Function,
+    AccessExpr, Assignment, AssignmentTarget, BinaryOperator, Delete, Expr, FromTable, Function,
     FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert, JoinConstraint,
     JoinOperator, LimitClause, OnConflictAction, OnInsert, OrderByKind, Query,
-    Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, TableAlias,
+    Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, Subscript, TableAlias,
     TableFactor, TableObject, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value,
 };
 
@@ -247,6 +247,29 @@ fn anonymous(sql_type: SqlType, nullable: bool) -> Column {
 
 fn typed_hint(name: &str, sql_type: SqlType) -> Column {
     Column::new(name, TypeInfo::not_null(sql_type))
+}
+
+fn array_element_declared_type(declared: &str) -> Option<String> {
+    let mut base = declared.trim();
+    let mut dimensions = 0;
+
+    loop {
+        let trimmed = base.trim_end();
+        if !trimmed.ends_with(']') {
+            break;
+        }
+        let Some(open) = trimmed.rfind('[') else {
+            break;
+        };
+        let bound = &trimmed[open + 1..trimmed.len() - 1];
+        if !bound.is_empty() && !bound.chars().all(|ch| ch.is_ascii_digit()) {
+            break;
+        }
+        dimensions += 1;
+        base = &trimmed[..open];
+    }
+
+    (dimensions > 0).then(|| base.trim().to_string())
 }
 
 pub struct Analyzer<'s> {
@@ -1290,6 +1313,60 @@ impl<'s> Analyzer<'s> {
                 column.name = String::new();
                 column.type_info.nullable = true;
                 Ok(column)
+            }
+            Expr::CompoundFieldAccess { root, access_chain } => {
+                let column = self.walk_expr(root, None, None, scope)?;
+                let is_array_index = access_chain
+                    .iter()
+                    .all(|access| matches!(access, AccessExpr::Subscript(Subscript::Index { .. })));
+
+                if is_array_index {
+                    if let Some(element_type) = column
+                        .type_info
+                        .declared
+                        .as_deref()
+                        .and_then(array_element_declared_type)
+                    {
+                        for access in access_chain {
+                            if let AccessExpr::Subscript(Subscript::Index { index }) = access {
+                                let expected = typed_hint("", SqlType::Int);
+                                self.walk_expr(index, Some(&expected), None, scope)?;
+                            }
+                        }
+
+                        return Ok(Column::new(
+                            "",
+                            TypeInfo {
+                                sql_type: column.type_info.sql_type,
+                                nullable: true,
+                                declared: Some(element_type),
+                            },
+                        ));
+                    }
+                }
+
+                for access in access_chain {
+                    match access {
+                        AccessExpr::Dot(expr) => {
+                            self.walk_expr(expr, None, None, scope)?;
+                        }
+                        AccessExpr::Subscript(Subscript::Index { index }) => {
+                            self.walk_expr(index, None, None, scope)?;
+                        }
+                        AccessExpr::Subscript(Subscript::Slice {
+                            lower_bound,
+                            upper_bound,
+                            stride,
+                        }) => {
+                            for bound in [lower_bound, upper_bound, stride].into_iter().flatten() {
+                                self.walk_expr(bound, None, None, scope)?;
+                            }
+                        }
+                    }
+                }
+
+                self.warn(format!("expression `{}` is not understood; typed as Any", expr));
+                Ok(anonymous(SqlType::Any, true))
             }
             Expr::Function(function) => self.walk_function(function, expected, hint, scope),
             Expr::Tuple(items) => {
