@@ -1,4 +1,4 @@
--- name: inspect_arrays :one
+-- name: inspect_arrays :many
 SELECT
     cardinality(tags) AS tag_count,
     cardinality(score_matrix) AS matrix_count,

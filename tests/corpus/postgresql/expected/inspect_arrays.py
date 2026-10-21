@@ -12,7 +12,7 @@ def _row_dict(model: type[pydantic.BaseModel], row: typing.Sequence[object]) -> 
     return dict(zip(model.model_fields, row, strict=True))
 
 
-# ---- inspect_arrays (:one) ----
+# ---- inspect_arrays (:many) ----
 
 
 class InspectArraysRow(pydantic.BaseModel):
@@ -56,9 +56,8 @@ async def inspect_arrays(
     *,
     dimension: int,
     start_position: int,
-) -> InspectArraysRow | None:
+) -> list[InspectArraysRow]:
     """Runs `inspect_arrays`."""
     params = InspectArraysParams(dimension=dimension, start_position=start_position).model_dump(by_alias=True)
     await cursor.execute(INSPECT_ARRAYS, params)
-    row = await cursor.fetchone()
-    return InspectArraysRow.model_validate(_row_dict(InspectArraysRow, row)) if row is not None else None
+    return [InspectArraysRow.model_validate(_row_dict(InspectArraysRow, row)) for row in await cursor.fetchall()]
