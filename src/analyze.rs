@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    AccessExpr, Assignment, AssignmentTarget, BinaryOperator, Delete, Expr, FromTable, Function,
+    AccessExpr, Assignment, AssignmentTarget, BinaryOperator, DateTimeField, Delete, Expr, FromTable, Function,
     FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert, JoinConstraint,
     JoinOperator, LimitClause, OnConflictAction, OnInsert, OrderByKind, Query,
     Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, Subscript, TableAlias,
@@ -1393,7 +1393,28 @@ impl<'s> Analyzer<'s> {
                     declared: Some(typed.data_type.to_string()),
                 },
             )),
-            Expr::Interval(_) => Ok(anonymous(SqlType::Interval, false)),
+            Expr::Interval(interval) => {
+                // `INTERVAL ? DAY` (MySQL) takes a count for a single unit;
+                // otherwise the value is an interval string such as '1 day'.
+                let single_unit = interval.last_field.is_none()
+                    && matches!(
+                        interval.leading_field,
+                        Some(
+                            DateTimeField::Year
+                                | DateTimeField::Quarter
+                                | DateTimeField::Month
+                                | DateTimeField::Week(_)
+                                | DateTimeField::Day
+                                | DateTimeField::Hour
+                                | DateTimeField::Minute
+                                | DateTimeField::Second
+                                | DateTimeField::Microsecond
+                        )
+                    );
+                let expected = typed_hint("", if single_unit { SqlType::Int } else { SqlType::Text });
+                let value = self.walk_expr(&interval.value, Some(&expected), None, scope)?;
+                Ok(anonymous(SqlType::Interval, value.type_info.nullable))
+            }
             Expr::Extract { expr, .. } => {
                 let inner = self.walk_expr(expr, None, None, scope)?;
                 // PostgreSQL 14+ returns numeric; MySQL returns an integer.
@@ -1819,7 +1840,6 @@ fn function_arg_expectation(
         "array_length" | "array_lower" | "array_upper" if index == 1 => int(),
         "array_position" if index == 2 => int(),
         "date_trunc" | "date_part" if index == 0 => text(),
-        "date_trunc" | "date_part" if index == 1 => Some(typed_hint("", SqlType::DateTime)),
         "to_char" | "to_date" | "to_timestamp" if index == 1 => text(),
         "to_date" => text(),
         "age" => Some(typed_hint("", SqlType::DateTime)),
