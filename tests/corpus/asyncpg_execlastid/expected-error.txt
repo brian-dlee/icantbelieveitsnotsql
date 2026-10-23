@@ -1,0 +1,1 @@
+use `RETURNING id` with `:one`

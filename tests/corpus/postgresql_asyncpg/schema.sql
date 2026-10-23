@@ -1,0 +1,6 @@
+CREATE TABLE widgets (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    price DOUBLE PRECISION NOT NULL,
+    meta JSONB
+);

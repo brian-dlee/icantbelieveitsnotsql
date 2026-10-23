@@ -3,13 +3,14 @@
 
 import typing
 
-import aiosqlite
+import aiomysql
 import pydantic
 
 
 def _row_dict(model: type[pydantic.BaseModel], row: typing.Sequence[object]) -> dict[str, object]:
     """Maps a result row onto the model's fields by position, so unaliased expressions work."""
-    return dict(zip(model.model_fields, row, strict=True))
+    values = list(row.values()) if isinstance(row, dict) else row
+    return dict(zip(model.model_fields, values, strict=True))
 
 
 # ---- list_recent_accounts (:many) ----
@@ -32,13 +33,13 @@ class ListRecentAccountsParams(pydantic.BaseModel):
 LIST_RECENT_ACCOUNTS = """
 SELECT id, email
 FROM accounts
-WHERE created_at > NOW() - INTERVAL ? DAY
-  AND status = ?
+WHERE created_at > NOW() - INTERVAL %s DAY
+  AND status = %s
 """
 
 
 async def list_recent_accounts(
-    cursor: aiosqlite.Cursor,
+    cursor: aiomysql.Cursor,
     *,
     param_1: int,
     status: str,

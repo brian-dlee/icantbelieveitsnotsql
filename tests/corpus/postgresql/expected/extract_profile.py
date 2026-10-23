@@ -3,7 +3,7 @@
 
 import typing
 
-import aiosqlite
+import asyncpg
 import pydantic
 
 
@@ -64,12 +64,11 @@ WHERE email = $1
 
 
 async def extract_profile(
-    cursor: aiosqlite.Cursor,
+    connection: asyncpg.Connection | asyncpg.Pool,
     *,
     email: str,
 ) -> ExtractProfileRow | None:
     """Runs `extract_profile`."""
     params = tuple(ExtractProfileParams(email=email).model_dump(by_alias=True).values())
-    await cursor.execute(EXTRACT_PROFILE, params)
-    row = await cursor.fetchone()
+    row = await connection.fetchrow(EXTRACT_PROFILE, *params)
     return ExtractProfileRow.model_validate(_row_dict(ExtractProfileRow, row)) if row is not None else None

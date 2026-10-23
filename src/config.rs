@@ -13,9 +13,10 @@ pub struct PythonConfig {
     #[serde(rename = "output-dir")]
     pub output_dir: PathBuf,
 
-    /// Database driver the generated code targets. Only `aiosqlite` today.
-    #[serde(default = "default_driver")]
-    pub driver: String,
+    /// Database driver the generated code targets: `aiosqlite`, `pymysql`,
+    /// `aiomysql` or `asyncpg`. Defaults to the dialect's async driver.
+    #[serde(default)]
+    pub driver: Option<String>,
 
     /// Python type overrides keyed by `table.column`.
     #[serde(rename = "column-types", default)]
@@ -24,10 +25,6 @@ pub struct PythonConfig {
     /// Python type overrides keyed by the declared SQL type name (`DATETIME`).
     #[serde(rename = "sql-types", default)]
     pub sql_types: BTreeMap<String, String>,
-}
-
-fn default_driver() -> String {
-    String::from("aiosqlite")
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,7 +90,7 @@ impl Config {
         }
         self.generate.output_dir.as_ref().map(|output_dir| PythonConfig {
             output_dir: output_dir.clone(),
-            driver: default_driver(),
+            driver: None,
             column_types: BTreeMap::new(),
             sql_types: BTreeMap::new(),
         })

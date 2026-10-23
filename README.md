@@ -3,13 +3,19 @@
 `butter` turns plain SQL files into typed data-access code, in the spirit of
 [sqlc](https://sqlc.dev). You write the SQL you would run anyway, annotate each
 statement with a name and a result shape, and `butter generate` writes one
-module per SQL file with an `async` function per query and a
+module per SQL file with a function per query and a
 [pydantic](https://docs.pydantic.dev) model tailored to each result set.
 
-Today it generates **Python for `aiosqlite` + pydantic**. The parser
-([sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs)) understands
-SQLite, PostgreSQL, MySQL and a generic dialect, but type inference and the
-generated driver code are SQLite-first.
+It generates **Python + pydantic** for these drivers:
+
+| Dialect      | Drivers                                   | Placeholders in generated SQL |
+| ------------ | ----------------------------------------- | ----------------------------- |
+| `sqlite`     | `aiosqlite` (default)                     | as written (`:name`, `?`)     |
+| `mysql`      | `aiomysql` (default), `pymysql` (sync)    | `%(name)s`, `%s`              |
+| `postgresql` | `asyncpg` (default)                       | `$1`, `$2`, ...               |
+
+The parser ([sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs))
+understands SQLite, PostgreSQL, MySQL and a generic dialect.
 
 ## Install
 
@@ -218,7 +224,7 @@ schema-files = ["schema.sql"]   # optional extra CREATE TABLE files
 
 [generate.python]
 output-dir = "pkg/butter"       # receives <stem>.py per query file (+ __init__.py once)
-driver = "aiosqlite"            # the only driver for now
+driver = "aiosqlite"            # aiosqlite | pymysql | aiomysql | asyncpg; defaults by dialect
 
 [generate.python.column-types]  # "table.column" = "python type"
 [generate.python.sql-types]     # "SQLTYPE" = "python type"
@@ -239,15 +245,41 @@ functions, `"double quoted"` string literals) go to stderr.
 
 - One module per SQL file; a private `_row_dict` helper only where needed.
 - `<PascalName>Row` and `<PascalName>Params` pydantic models per query.
-- The SQL text is emitted verbatim as `<NAME>` (or `<NAME>_1`, `<NAME>_2`, ...)
-  module constants, so it can be logged or reused.
+- The SQL text is emitted as `<NAME>` (or `<NAME>_1`, `<NAME>_2`, ...) module
+  constants, so it can be logged or reused. Placeholders are rewritten into the
+  driver's parameter style; nothing else changes.
 - `__init__.py` is created once and never overwritten.
 - Output passes `ruff check` and `ty`; `ruff format` may still reflow long lines.
 
+### Drivers
+
+You always write `:name` (or `?`, or `$N` for PostgreSQL) in the `.sql` files.
+butter rewrites them for the configured driver:
+
+- **`aiosqlite`**: `async def f(cursor: aiosqlite.Cursor, ...)`. The SQL is
+  unchanged.
+- **`pymysql`**: `def f(cursor: pymysql.cursors.Cursor, ...)`, synchronous.
+  **`aiomysql`**: the same with `async def` and `aiomysql.Cursor`. Placeholders
+  become `%(name)s` / `%s`. Literal `%` is doubled when the statement binds
+  parameters, because the driver formats the query only then. Plain cursors
+  and `DictCursor` both work: rows are mapped onto the model by position.
+- **`asyncpg`**: `async def f(connection: asyncpg.Connection | asyncpg.Pool, ...)`.
+  Named placeholders become `$1, $2, ...` in parameter order. `:execrows`
+  reads the count from the command tag (`UPDATE 3`), and `:execmany` returns
+  `None` because asyncpg reports no count. `:execlastid` is rejected: use
+  `RETURNING id` with `:one`. A query with several statements cannot bind
+  parameters, and it takes an `asyncpg.Connection` only, because a pool may
+  run each statement on a different connection. `UUID` maps to `uuid.UUID`.
+
+For the MySQL drivers and asyncpg, JSON/JSONB *parameters* are typed `str`:
+pass serialized JSON (`json.dumps(value)`), which is what those drivers bind
+without a custom codec. If you register a codec, override the type with
+`[generate.python.sql-types]`.
+
 ## Limitations
 
-- SQLite-oriented type inference. Other dialects parse, but their functions and
-  types mostly fall back to `typing.Any` with warnings.
+- Type inference started with SQLite. PostgreSQL and MySQL functions are being
+  added, and unknown ones fall back to `typing.Any` with a warning.
 - No dynamic SQL: write one named query per variant (`..._by_status`,
   `..._ignore_conflicts`) or use `(:p IS NULL OR col = :p)`.
 - Numbered `?NNN` placeholders are rejected.

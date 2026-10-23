@@ -1,0 +1,1 @@
+python driver `pymysql` does not support the `postgresql` dialect

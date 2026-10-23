@@ -3,7 +3,7 @@
 
 import typing
 
-import aiosqlite
+import asyncpg
 import pydantic
 
 
@@ -47,21 +47,21 @@ SELECT
     cardinality(score_matrix) AS matrix_count,
     tags[1] AS first_tag,
     score_matrix[1][2] AS score_cell,
-    tags[$tag_index] AS indexed_tag,
+    tags[$1] AS indexed_tag,
     array_ndims('{}'::integer[]) AS empty_array_dimensions,
     array_length('{1,2,3}'::integer[], 2) AS missing_dimension_length,
-    array_length(score_matrix, :dimension) AS requested_dimension_length,
+    array_length(score_matrix, $2) AS requested_dimension_length,
     array_lower('{}'::integer[], 1) AS empty_array_lower,
     array_upper('{}'::integer[], 1) AS empty_array_upper,
     array_position('{red,green}'::text[], 'blue') AS missing_item_position,
-    array_position('{red,green}'::text[], 'green', :start_position) AS starting_position
+    array_position('{red,green}'::text[], 'green', $3) AS starting_position
 FROM public.accounts
-WHERE tags[$tag_index] = $tag_value
+WHERE tags[$1] = $4
 """
 
 
 async def inspect_arrays(
-    cursor: aiosqlite.Cursor,
+    connection: asyncpg.Connection | asyncpg.Pool,
     *,
     tag_index: int,
     dimension: int,
@@ -69,6 +69,5 @@ async def inspect_arrays(
     tag_value: str,
 ) -> list[InspectArraysRow]:
     """Runs `inspect_arrays`."""
-    params = InspectArraysParams(tag_index=tag_index, dimension=dimension, start_position=start_position, tag_value=tag_value).model_dump(by_alias=True)
-    await cursor.execute(INSPECT_ARRAYS, params)
-    return [InspectArraysRow.model_validate(_row_dict(InspectArraysRow, row)) for row in await cursor.fetchall()]
+    params = tuple(InspectArraysParams(tag_index=tag_index, dimension=dimension, start_position=start_position, tag_value=tag_value).model_dump(by_alias=True).values())
+    return [InspectArraysRow.model_validate(_row_dict(InspectArraysRow, row)) for row in await connection.fetch(INSPECT_ARRAYS, *params)]

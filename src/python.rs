@@ -1,11 +1,13 @@
-//! Python code generation: one module per SQL file, targeting `aiosqlite`
-//! cursors and `pydantic` models.
+//! Python code generation: one module per SQL file, targeting a database
+//! driver (`aiosqlite`, `pymysql`, `aiomysql` or `asyncpg`) and `pydantic` models.
 
 use std::collections::BTreeSet;
 
 use crate::analyze::Param;
 use crate::config::PythonConfig;
+use crate::dialect::SqlDialect;
 use crate::generate::{Module, QueryUnit};
+use crate::paramstyle::{self, ParamStyle};
 use crate::queryfile::Command;
 use crate::schema::Column;
 use crate::types::{SqlType, TypeInfo};
@@ -18,7 +20,111 @@ const PYTHON_KEYWORDS: &[&str] = &[
 ];
 
 /// Names the generated function bodies use for their own locals.
-const RESERVED_PARAM_NAMES: &[&str] = &["cursor", "rows", "row", "params", "self", "cls"];
+const RESERVED_PARAM_NAMES: &[&str] = &["cursor", "connection", "rows", "row", "params", "self", "cls"];
+
+/// The database driver the generated functions call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Driver {
+    Aiosqlite,
+    Pymysql,
+    Aiomysql,
+    Asyncpg,
+}
+
+impl Driver {
+    /// The configured driver, or the dialect's async default, checked against the dialect.
+    pub fn resolve(name: Option<&str>, dialect: SqlDialect) -> Result<Driver, String> {
+        let driver = match name {
+            Some(name) => Driver::parse(name)?,
+            None => match dialect {
+                SqlDialect::MySQL => Driver::Aiomysql,
+                SqlDialect::PostgreSQL => Driver::Asyncpg,
+                SqlDialect::SQLite | SqlDialect::Generic => Driver::Aiosqlite,
+            },
+        };
+        if !driver.supports(dialect) {
+            return Err(format!(
+                "python driver `{}` does not support the `{}` dialect",
+                driver.name(),
+                dialect.name()
+            ));
+        }
+        Ok(driver)
+    }
+
+    fn parse(name: &str) -> Result<Driver, String> {
+        match name.to_lowercase().as_str() {
+            "aiosqlite" => Ok(Driver::Aiosqlite),
+            "pymysql" => Ok(Driver::Pymysql),
+            "aiomysql" => Ok(Driver::Aiomysql),
+            "asyncpg" => Ok(Driver::Asyncpg),
+            _ => Err(format!(
+                "unsupported Python driver `{}`; expected one of aiosqlite, pymysql, aiomysql, asyncpg",
+                name
+            )),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Driver::Aiosqlite => "aiosqlite",
+            Driver::Pymysql => "pymysql",
+            Driver::Aiomysql => "aiomysql",
+            Driver::Asyncpg => "asyncpg",
+        }
+    }
+
+    fn supports(self, dialect: SqlDialect) -> bool {
+        match self {
+            Driver::Aiosqlite => matches!(dialect, SqlDialect::SQLite | SqlDialect::Generic),
+            Driver::Pymysql | Driver::Aiomysql => dialect == SqlDialect::MySQL,
+            Driver::Asyncpg => dialect == SqlDialect::PostgreSQL,
+        }
+    }
+
+    fn param_style(self) -> ParamStyle {
+        match self {
+            Driver::Aiosqlite => ParamStyle::Native,
+            Driver::Pymysql | Driver::Aiomysql => ParamStyle::Pyformat,
+            Driver::Asyncpg => ParamStyle::Numeric,
+        }
+    }
+
+    fn import(self) -> &'static str {
+        match self {
+            Driver::Aiosqlite => "aiosqlite",
+            Driver::Pymysql => "pymysql.cursors",
+            Driver::Aiomysql => "aiomysql",
+            Driver::Asyncpg => "asyncpg",
+        }
+    }
+
+    /// The first argument of every generated function.
+    fn handle(self, statements: usize) -> &'static str {
+        match self {
+            Driver::Aiosqlite => "cursor: aiosqlite.Cursor",
+            Driver::Pymysql => "cursor: pymysql.cursors.Cursor",
+            Driver::Aiomysql => "cursor: aiomysql.Cursor",
+            // A pool runs each call on whichever connection it hands out, so
+            // statements that share session state need a single connection.
+            Driver::Asyncpg if statements > 1 => "connection: asyncpg.Connection",
+            Driver::Asyncpg => "connection: asyncpg.Connection | asyncpg.Pool",
+        }
+    }
+
+    fn is_async(self) -> bool {
+        self != Driver::Pymysql
+    }
+
+    /// `await ` for async drivers, nothing for synchronous ones.
+    fn wait(self) -> &'static str {
+        if self.is_async() {
+            "await "
+        } else {
+            ""
+        }
+    }
+}
 
 const STDLIB_MODULES: &[&str] = &[
     "abc", "collections", "dataclasses", "datetime", "decimal", "enum", "functools", "ipaddress",
@@ -79,14 +185,15 @@ fn escape_triple_quoted(sql: &str) -> String {
 
 struct TypeResolver<'c> {
     config: &'c PythonConfig,
+    driver: Driver,
     imports: BTreeSet<String>,
 }
 
 impl<'c> TypeResolver<'c> {
-    fn new(config: &'c PythonConfig) -> TypeResolver<'c> {
+    fn new(config: &'c PythonConfig, driver: Driver) -> TypeResolver<'c> {
         let mut imports = BTreeSet::new();
-        imports.insert(String::from("aiosqlite"));
-        TypeResolver { config, imports }
+        imports.insert(String::from(driver.import()));
+        TypeResolver { config, driver, imports }
     }
 
     /// Records `import x.y` for every dotted name in a user-written type.
@@ -143,6 +250,7 @@ impl<'c> TypeResolver<'c> {
         type_info: &TypeInfo,
         source: Option<&(String, String)>,
         explicit: Option<&str>,
+        is_param: bool,
     ) -> String {
         if let Some(explicit) = explicit {
             self.collect_imports(explicit);
@@ -169,7 +277,7 @@ impl<'c> TypeResolver<'c> {
                 self.collect_imports(&custom);
                 custom
             }
-            None => self.default_type(type_info.sql_type),
+            None => self.driver_type(type_info, is_param),
         };
 
         // PostgreSQL array elements can be NULL even when the array column is
@@ -196,6 +304,29 @@ impl<'c> TypeResolver<'c> {
         } else {
             base
         }
+    }
+
+    /// The default Python type, adjusted for what the driver actually
+    /// sends and returns.
+    fn driver_type(&mut self, type_info: &TypeInfo, is_param: bool) -> String {
+        let declared_base = type_info
+            .declared
+            .as_deref()
+            .map(|d| d.split(['(', '[']).next().unwrap_or("").trim().to_uppercase());
+
+        // asyncpg decodes UUID columns to uuid.UUID.
+        if self.driver == Driver::Asyncpg && declared_base.as_deref() == Some("UUID") {
+            self.imports.insert(String::from("uuid"));
+            return String::from("uuid.UUID");
+        }
+
+        // Without a registered codec, asyncpg, PyMySQL and aiomysql bind JSON
+        // as text, so JSON parameters take serialized JSON (`json.dumps(...)`).
+        if is_param && type_info.sql_type == SqlType::Json && self.driver != Driver::Aiosqlite {
+            return String::from("str");
+        }
+
+        self.default_type(type_info.sql_type)
     }
 
     fn default_type(&mut self, sql_type: SqlType) -> String {
@@ -246,7 +377,7 @@ fn param_fields(unit: &QueryUnit, resolver: &mut TypeResolver) -> Vec<FieldSpec>
                 .iter()
                 .find(|(n, _)| n == &param.name)
                 .map(|(_, t)| t.as_str());
-            let type_expr = resolver.resolve(&param.type_info, param.source.as_ref(), explicit);
+            let type_expr = resolver.resolve(&param.type_info, param.source.as_ref(), explicit, true);
 
             let mut python_name = python_field_name(&param.name, RESERVED_PARAM_NAMES);
             while used.contains(&python_name) {
@@ -274,7 +405,7 @@ fn column_fields(unit: &QueryUnit, resolver: &mut TypeResolver) -> Vec<FieldSpec
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(&column.name))
                 .map(|(_, t)| t.as_str());
-            let type_expr = resolver.resolve(&column.type_info, column.source.as_ref(), explicit);
+            let type_expr = resolver.resolve(&column.type_info, column.source.as_ref(), explicit, false);
 
             let mut python_name = python_field_name(&column.name, &[]);
             while used.contains(&python_name) {
@@ -333,29 +464,69 @@ fn sql_constant_name(unit: &QueryUnit, index: usize) -> String {
     }
 }
 
-fn render_sql_constants(out: &mut String, unit: &QueryUnit) {
+fn render_sql_constants(
+    out: &mut String,
+    unit: &QueryUnit,
+    driver: Driver,
+    dialect: SqlDialect,
+) -> Result<(), String> {
+    let parser_dialect = dialect.parser_dialect();
     for (index, statement) in unit.statements.iter().enumerate() {
+        let bound = !unit.params.is_empty() && statement.has_params;
+        let sql = paramstyle::rewrite(
+            &statement.sql,
+            parser_dialect.as_ref(),
+            driver.param_style(),
+            &unit.params,
+            bound,
+        )
+        .map_err(|message| format!("query `{}`: {}", unit.name, message))?;
         out.push_str(&format!(
             "{} = \"\"\"\n{}\n\"\"\"\n\n",
             sql_constant_name(unit, index),
-            escape_triple_quoted(&statement.sql)
+            escape_triple_quoted(&sql)
         ));
     }
     out.push('\n');
+    Ok(())
 }
 
-fn render_function(out: &mut String, unit: &QueryUnit, row_class: &str, params_class: &str, fields: &[FieldSpec]) {
+fn render_function(
+    out: &mut String,
+    unit: &QueryUnit,
+    row_class: &str,
+    params_class: &str,
+    fields: &[FieldSpec],
+    driver: Driver,
+) -> Result<(), String> {
+    let pg = driver == Driver::Asyncpg;
+    if pg && unit.command == Command::ExecLastId {
+        return Err(format!(
+            "query `{}`: asyncpg has no last-insert id; use `RETURNING id` with `:one` instead of `:execlastid`",
+            unit.name
+        ));
+    }
+    if pg && unit.statements.len() > 1 && !fields.is_empty() {
+        return Err(format!(
+            "query `{}`: asyncpg cannot bind parameters to several statements at once; split the query",
+            unit.name
+        ));
+    }
+
     let return_type = match unit.command {
         Command::One => format!("{} | None", row_class),
         Command::Many => format!("list[{}]", row_class),
         Command::Exec => String::from("None"),
+        Command::ExecMany if pg => String::from("None"),
         Command::ExecRows | Command::ExecMany => String::from("int"),
         Command::ExecLastId => String::from("int | None"),
     };
+    let wait = driver.wait();
 
     // Signature.
-    out.push_str(&format!("async def {}(\n", unit.name));
-    out.push_str("    cursor: aiosqlite.Cursor,\n");
+    let def = if driver.is_async() { "async def" } else { "def" };
+    out.push_str(&format!("{} {}(\n", def, unit.name));
+    out.push_str(&format!("    {},\n", driver.handle(unit.statements.len())));
 
     if unit.command == Command::ExecMany {
         out.push_str(&format!("    rows: typing.Iterable[{}],\n", params_class));
@@ -383,7 +554,9 @@ fn render_function(out: &mut String, unit: &QueryUnit, row_class: &str, params_c
         out.push_str("    \"\"\"\n");
     }
 
-    let dump = if unit.positional {
+    // asyncpg binds every placeholder positionally ($1, $2, ...).
+    let positional = unit.positional || pg;
+    let dump = if positional {
         "tuple(row.model_dump(by_alias=True).values())"
     } else {
         "row.model_dump(by_alias=True)"
@@ -391,13 +564,33 @@ fn render_function(out: &mut String, unit: &QueryUnit, row_class: &str, params_c
 
     // Body.
     if unit.command == Command::ExecMany {
-        out.push_str(&format!(
-            "    await cursor.executemany({}, [{} for row in rows])\n",
-            sql_constant_name(unit, 0),
-            dump
-        ));
-        out.push_str("    return cursor.rowcount\n");
-        return;
+        if pg {
+            out.push_str(&format!(
+                "    await connection.executemany({}, [{} for row in rows])\n",
+                sql_constant_name(unit, 0),
+                dump
+            ));
+        } else if matches!(driver, Driver::Pymysql | Driver::Aiomysql) {
+            // PyMySQL and aiomysql leave rowcount untouched for an empty batch.
+            out.push_str(&format!("    params = [{} for row in rows]\n", dump));
+            out.push_str("    if not params:\n");
+            out.push_str("        return 0\n");
+            out.push_str(&format!(
+                "    {}cursor.executemany({}, params)\n",
+                wait,
+                sql_constant_name(unit, 0)
+            ));
+            out.push_str("    return cursor.rowcount\n");
+        } else {
+            out.push_str(&format!(
+                "    {}cursor.executemany({}, [{} for row in rows])\n",
+                wait,
+                sql_constant_name(unit, 0),
+                dump
+            ));
+            out.push_str("    return cursor.rowcount\n");
+        }
+        return Ok(());
     }
 
     let has_params = !fields.is_empty();
@@ -407,7 +600,7 @@ fn render_function(out: &mut String, unit: &QueryUnit, row_class: &str, params_c
             .map(|f| format!("{}={}", f.python_name, f.python_name))
             .collect();
         let constructed = format!("{}({})", params_class, kwargs.join(", "));
-        let dumped = if unit.positional {
+        let dumped = if positional {
             format!("tuple({}.model_dump(by_alias=True).values())", constructed)
         } else {
             format!("{}.model_dump(by_alias=True)", constructed)
@@ -415,20 +608,58 @@ fn render_function(out: &mut String, unit: &QueryUnit, row_class: &str, params_c
         out.push_str(&format!("    params = {}\n", dumped));
     }
 
+    if pg {
+        let constant = sql_constant_name(unit, 0);
+        let args = if has_params { ", *params" } else { "" };
+        match unit.command {
+            Command::One => {
+                out.push_str(&format!("    row = await connection.fetchrow({}{})\n", constant, args));
+                out.push_str(&format!(
+                    "    return {}.model_validate(_row_dict({}, row)) if row is not None else None\n",
+                    row_class, row_class
+                ));
+            }
+            Command::Many => {
+                out.push_str(&format!(
+                    "    return [{}.model_validate(_row_dict({}, row)) for row in await connection.fetch({}{})]\n",
+                    row_class, row_class, constant, args
+                ));
+            }
+            Command::Exec => {
+                for index in 0..unit.statements.len() {
+                    out.push_str(&format!(
+                        "    await connection.execute({}{})\n",
+                        sql_constant_name(unit, index),
+                        args
+                    ));
+                }
+            }
+            Command::ExecRows => {
+                out.push_str(&format!(
+                    "    return _affected_rows(await connection.execute({}{}))\n",
+                    constant, args
+                ));
+            }
+            Command::ExecLastId | Command::ExecMany => unreachable!(),
+        }
+        return Ok(());
+    }
+
     for (index, statement) in unit.statements.iter().enumerate() {
         if has_params && statement.has_params {
             out.push_str(&format!(
-                "    await cursor.execute({}, params)\n",
+                "    {}cursor.execute({}, params)\n",
+                wait,
                 sql_constant_name(unit, index)
             ));
         } else {
-            out.push_str(&format!("    await cursor.execute({})\n", sql_constant_name(unit, index)));
+            out.push_str(&format!("    {}cursor.execute({})\n", wait, sql_constant_name(unit, index)));
         }
     }
 
     match unit.command {
         Command::One => {
-            out.push_str("    row = await cursor.fetchone()\n");
+            out.push_str(&format!("    row = {}cursor.fetchone()\n", wait));
             out.push_str(&format!(
                 "    return {}.model_validate(_row_dict({}, row)) if row is not None else None\n",
                 row_class, row_class
@@ -436,8 +667,8 @@ fn render_function(out: &mut String, unit: &QueryUnit, row_class: &str, params_c
         }
         Command::Many => {
             out.push_str(&format!(
-                "    return [{}.model_validate(_row_dict({}, row)) for row in await cursor.fetchall()]\n",
-                row_class, row_class
+                "    return [{}.model_validate(_row_dict({}, row)) for row in {}cursor.fetchall()]\n",
+                row_class, row_class, wait
             ));
         }
         Command::Exec => {}
@@ -445,10 +676,16 @@ fn render_function(out: &mut String, unit: &QueryUnit, row_class: &str, params_c
         Command::ExecLastId => out.push_str("    return cursor.lastrowid\n"),
         Command::ExecMany => unreachable!(),
     }
+    Ok(())
 }
 
-pub fn render_module(module: &Module, config: &PythonConfig) -> Result<String, String> {
-    let mut resolver = TypeResolver::new(config);
+pub fn render_module(
+    module: &Module,
+    config: &PythonConfig,
+    dialect: SqlDialect,
+    driver: Driver,
+) -> Result<String, String> {
+    let mut resolver = TypeResolver::new(config, driver);
     let first_party_root: Option<String> = config
         .output_dir
         .components()
@@ -510,8 +747,8 @@ pub fn render_module(module: &Module, config: &PythonConfig) -> Result<String, S
             );
         }
 
-        render_sql_constants(&mut body, unit);
-        render_function(&mut body, unit, &row_class, &params_class, &param_specs);
+        render_sql_constants(&mut body, unit, driver, dialect)?;
+        render_function(&mut body, unit, &row_class, &params_class, &param_specs, driver)?;
         body.push_str("\n\n");
     }
 
@@ -542,10 +779,24 @@ pub fn render_module(module: &Module, config: &PythonConfig) -> Result<String, S
         out.push('\n');
     }
 
+    let needs_tag_helper = driver == Driver::Asyncpg && module.units.iter().any(|u| u.command == Command::ExecRows);
+    if needs_tag_helper {
+        out.push_str("\ndef _affected_rows(tag: str) -> int:\n");
+        out.push_str("    \"\"\"Reads the row count from an asyncpg command tag such as `UPDATE 3` or `INSERT 0 2`.\"\"\"\n");
+        out.push_str("    count = tag.rsplit(\" \", 1)[-1]\n");
+        out.push_str("    return int(count) if count.isdigit() else 0\n\n");
+    }
+
     if needs_row_helper {
         out.push_str("\ndef _row_dict(model: type[pydantic.BaseModel], row: typing.Sequence[object]) -> dict[str, object]:\n");
         out.push_str("    \"\"\"Maps a result row onto the model's fields by position, so unaliased expressions work.\"\"\"\n");
-        out.push_str("    return dict(zip(model.model_fields, row, strict=True))\n\n\n");
+        if matches!(driver, Driver::Pymysql | Driver::Aiomysql) {
+            // DictCursor rows are dicts in column order; plain cursors return tuples.
+            out.push_str("    values = list(row.values()) if isinstance(row, dict) else row\n");
+            out.push_str("    return dict(zip(model.model_fields, values, strict=True))\n\n\n");
+        } else {
+            out.push_str("    return dict(zip(model.model_fields, row, strict=True))\n\n\n");
+        }
     } else {
         out.push('\n');
     }
