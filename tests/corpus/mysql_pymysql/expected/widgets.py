@@ -60,7 +60,10 @@ def create_widgets(
     rows: typing.Iterable[CreateWidgetsParams],
 ) -> int:
     """Runs `create_widgets`."""
-    cursor.executemany(CREATE_WIDGETS, [tuple(row.model_dump(by_alias=True).values()) for row in rows])
+    params = [tuple(row.model_dump(by_alias=True).values()) for row in rows]
+    if not params:
+        return 0
+    cursor.executemany(CREATE_WIDGETS, params)
     return cursor.rowcount
 
 

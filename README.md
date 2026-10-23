@@ -268,7 +268,13 @@ butter rewrites them for the configured driver:
   reads the count from the command tag (`UPDATE 3`), and `:execmany` returns
   `None` because asyncpg reports no count. `:execlastid` is rejected: use
   `RETURNING id` with `:one`. A query with several statements cannot bind
-  parameters.
+  parameters, and it takes an `asyncpg.Connection` only, because a pool may
+  run each statement on a different connection. `UUID` maps to `uuid.UUID`.
+
+For the MySQL drivers and asyncpg, JSON/JSONB *parameters* are typed `str`:
+pass serialized JSON (`json.dumps(value)`), which is what those drivers bind
+without a custom codec. If you register a codec, override the type with
+`[generate.python.sql-types]`.
 
 ## Limitations
 

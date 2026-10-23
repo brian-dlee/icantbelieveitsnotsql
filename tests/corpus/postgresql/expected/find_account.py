@@ -2,6 +2,7 @@
 # Source: queries/find_account.sql
 
 import typing
+import uuid
 
 import asyncpg
 import pydantic
@@ -19,7 +20,7 @@ class FindAccountRow(pydantic.BaseModel):
     """One result row of `find_account`."""
 
     id: int
-    external_id: str
+    external_id: uuid.UUID
     email: str
     profile: typing.Any | None
     tags: list[str | None] | None

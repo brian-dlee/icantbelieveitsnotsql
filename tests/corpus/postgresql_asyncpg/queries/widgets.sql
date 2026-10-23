@@ -11,3 +11,8 @@ UPDATE widgets SET price = price * 2 WHERE name LIKE '%gadget%' AND price < :lim
 
 -- name: list_widgets :many
 SELECT id, name FROM widgets ORDER BY id;
+
+-- Several statements share one session, so this takes a Connection, not a Pool.
+-- name: reset_widgets :exec
+SET LOCAL lock_timeout = '5s';
+DELETE FROM widgets;

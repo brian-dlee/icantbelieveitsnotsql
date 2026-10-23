@@ -100,11 +100,14 @@ impl Driver {
     }
 
     /// The first argument of every generated function.
-    fn handle(self) -> &'static str {
+    fn handle(self, statements: usize) -> &'static str {
         match self {
             Driver::Aiosqlite => "cursor: aiosqlite.Cursor",
             Driver::Pymysql => "cursor: pymysql.cursors.Cursor",
             Driver::Aiomysql => "cursor: aiomysql.Cursor",
+            // A pool runs each call on whichever connection it hands out, so
+            // statements that share session state need a single connection.
+            Driver::Asyncpg if statements > 1 => "connection: asyncpg.Connection",
             Driver::Asyncpg => "connection: asyncpg.Connection | asyncpg.Pool",
         }
     }
@@ -182,6 +185,7 @@ fn escape_triple_quoted(sql: &str) -> String {
 
 struct TypeResolver<'c> {
     config: &'c PythonConfig,
+    driver: Driver,
     imports: BTreeSet<String>,
 }
 
@@ -189,7 +193,7 @@ impl<'c> TypeResolver<'c> {
     fn new(config: &'c PythonConfig, driver: Driver) -> TypeResolver<'c> {
         let mut imports = BTreeSet::new();
         imports.insert(String::from(driver.import()));
-        TypeResolver { config, imports }
+        TypeResolver { config, driver, imports }
     }
 
     /// Records `import x.y` for every dotted name in a user-written type.
@@ -246,6 +250,7 @@ impl<'c> TypeResolver<'c> {
         type_info: &TypeInfo,
         source: Option<&(String, String)>,
         explicit: Option<&str>,
+        is_param: bool,
     ) -> String {
         if let Some(explicit) = explicit {
             self.collect_imports(explicit);
@@ -272,7 +277,7 @@ impl<'c> TypeResolver<'c> {
                 self.collect_imports(&custom);
                 custom
             }
-            None => self.default_type(type_info.sql_type),
+            None => self.driver_type(type_info, is_param),
         };
 
         // PostgreSQL array elements can be NULL even when the array column is
@@ -299,6 +304,29 @@ impl<'c> TypeResolver<'c> {
         } else {
             base
         }
+    }
+
+    /// The default Python type, adjusted for what the driver actually
+    /// sends and returns.
+    fn driver_type(&mut self, type_info: &TypeInfo, is_param: bool) -> String {
+        let declared_base = type_info
+            .declared
+            .as_deref()
+            .map(|d| d.split(['(', '[']).next().unwrap_or("").trim().to_uppercase());
+
+        // asyncpg decodes UUID columns to uuid.UUID.
+        if self.driver == Driver::Asyncpg && declared_base.as_deref() == Some("UUID") {
+            self.imports.insert(String::from("uuid"));
+            return String::from("uuid.UUID");
+        }
+
+        // Without a registered codec, asyncpg, PyMySQL and aiomysql bind JSON
+        // as text, so JSON parameters take serialized JSON (`json.dumps(...)`).
+        if is_param && type_info.sql_type == SqlType::Json && self.driver != Driver::Aiosqlite {
+            return String::from("str");
+        }
+
+        self.default_type(type_info.sql_type)
     }
 
     fn default_type(&mut self, sql_type: SqlType) -> String {
@@ -349,7 +377,7 @@ fn param_fields(unit: &QueryUnit, resolver: &mut TypeResolver) -> Vec<FieldSpec>
                 .iter()
                 .find(|(n, _)| n == &param.name)
                 .map(|(_, t)| t.as_str());
-            let type_expr = resolver.resolve(&param.type_info, param.source.as_ref(), explicit);
+            let type_expr = resolver.resolve(&param.type_info, param.source.as_ref(), explicit, true);
 
             let mut python_name = python_field_name(&param.name, RESERVED_PARAM_NAMES);
             while used.contains(&python_name) {
@@ -377,7 +405,7 @@ fn column_fields(unit: &QueryUnit, resolver: &mut TypeResolver) -> Vec<FieldSpec
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(&column.name))
                 .map(|(_, t)| t.as_str());
-            let type_expr = resolver.resolve(&column.type_info, column.source.as_ref(), explicit);
+            let type_expr = resolver.resolve(&column.type_info, column.source.as_ref(), explicit, false);
 
             let mut python_name = python_field_name(&column.name, &[]);
             while used.contains(&python_name) {
@@ -498,7 +526,7 @@ fn render_function(
     // Signature.
     let def = if driver.is_async() { "async def" } else { "def" };
     out.push_str(&format!("{} {}(\n", def, unit.name));
-    out.push_str(&format!("    {},\n", driver.handle()));
+    out.push_str(&format!("    {},\n", driver.handle(unit.statements.len())));
 
     if unit.command == Command::ExecMany {
         out.push_str(&format!("    rows: typing.Iterable[{}],\n", params_class));
@@ -542,6 +570,17 @@ fn render_function(
                 sql_constant_name(unit, 0),
                 dump
             ));
+        } else if matches!(driver, Driver::Pymysql | Driver::Aiomysql) {
+            // PyMySQL and aiomysql leave rowcount untouched for an empty batch.
+            out.push_str(&format!("    params = [{} for row in rows]\n", dump));
+            out.push_str("    if not params:\n");
+            out.push_str("        return 0\n");
+            out.push_str(&format!(
+                "    {}cursor.executemany({}, params)\n",
+                wait,
+                sql_constant_name(unit, 0)
+            ));
+            out.push_str("    return cursor.rowcount\n");
         } else {
             out.push_str(&format!(
                 "    {}cursor.executemany({}, [{} for row in rows])\n",

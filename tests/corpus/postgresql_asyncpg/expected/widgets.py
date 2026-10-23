@@ -32,7 +32,7 @@ class CreateWidgetParams(pydantic.BaseModel):
 
     name: str
     price: float
-    meta: typing.Any
+    meta: str
 
 
 CREATE_WIDGET = """
@@ -46,7 +46,7 @@ async def create_widget(
     *,
     name: str,
     price: float,
-    meta: typing.Any,
+    meta: str,
 ) -> CreateWidgetRow | None:
     """Runs `create_widget`."""
     params = tuple(CreateWidgetParams(name=name, price=price, meta=meta).model_dump(by_alias=True).values())
@@ -121,3 +121,22 @@ async def list_widgets(
 ) -> list[ListWidgetsRow]:
     """Runs `list_widgets`."""
     return [ListWidgetsRow.model_validate(_row_dict(ListWidgetsRow, row)) for row in await connection.fetch(LIST_WIDGETS)]
+
+
+# ---- reset_widgets (:exec) ----
+
+RESET_WIDGETS_1 = """
+SET LOCAL lock_timeout = '5s'
+"""
+
+RESET_WIDGETS_2 = """
+DELETE FROM widgets
+"""
+
+
+async def reset_widgets(
+    connection: asyncpg.Connection,
+) -> None:
+    """Runs `reset_widgets`."""
+    await connection.execute(RESET_WIDGETS_1)
+    await connection.execute(RESET_WIDGETS_2)
