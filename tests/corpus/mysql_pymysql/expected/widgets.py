@@ -7,6 +7,22 @@ import pydantic
 import pymysql.cursors
 
 
+def _expand_lists(
+    sql: str, params: dict[str, typing.Any], names: tuple[str, ...]
+) -> tuple[str, dict[str, typing.Any]]:
+    """Expands each list parameter into one placeholder per element.
+
+    An empty list becomes an empty subquery, so `IN` matches nothing and `NOT IN` everything.
+    """
+    expanded = {key: value for key, value in params.items() if key not in names}
+    for name in names:
+        keys = [f"{name}__{index}" for index in range(len(params[name]))]
+        expanded.update(zip(keys, params[name], strict=True))
+        placeholders = ", ".join(f"%({key})s" for key in keys)
+        sql = sql.replace(f"(%({name})s)", f"({placeholders})" if keys else "(SELECT NULL FROM DUAL WHERE FALSE)")
+    return sql, expanded
+
+
 def _row_dict(model: type[pydantic.BaseModel], row: typing.Sequence[object]) -> dict[str, object]:
     """Maps a result row onto the model's fields by position, so unaliased expressions work."""
     values = list(row.values()) if isinstance(row, dict) else row
@@ -126,3 +142,38 @@ def count_with_a(
     cursor.execute(COUNT_WITH_A)
     row = cursor.fetchone()
     return CountWithARow.model_validate(_row_dict(CountWithARow, row)) if row is not None else None
+
+
+# ---- widgets_by_ids (:many) ----
+
+
+class WidgetsByIdsRow(pydantic.BaseModel):
+    """One result row of `widgets_by_ids`."""
+
+    id: int
+    name: str
+
+
+class WidgetsByIdsParams(pydantic.BaseModel):
+    """Parameters of `widgets_by_ids`."""
+
+    ids: list[int]
+    excluded: list[str]
+
+
+WIDGETS_BY_IDS = """
+SELECT id, name FROM widgets WHERE id IN (%(ids)s) AND name NOT IN (%(excluded)s) ORDER BY id
+"""
+
+
+def widgets_by_ids(
+    cursor: pymysql.cursors.Cursor,
+    *,
+    ids: list[int],
+    excluded: list[str],
+) -> list[WidgetsByIdsRow]:
+    """Runs `widgets_by_ids`."""
+    params = WidgetsByIdsParams(ids=ids, excluded=excluded).model_dump(by_alias=True)
+    sql, query_params = _expand_lists(WIDGETS_BY_IDS, params, ("ids", "excluded"))
+    cursor.execute(sql, query_params)
+    return [WidgetsByIdsRow.model_validate(_row_dict(WidgetsByIdsRow, row)) for row in cursor.fetchall()]

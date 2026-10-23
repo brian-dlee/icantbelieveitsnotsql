@@ -159,6 +159,26 @@ Parameter types come from context:
 
 Override any of them with `-- param: <name> <python type>`.
 
+#### List parameters
+
+Declaring a `list[...]` type makes a parameter a list, for `IN` filters:
+
+```sql
+-- name: list_widgets_by_id :many
+-- param: ids list[int]
+SELECT id, name FROM widgets WHERE id IN (:ids);
+```
+
+- **asyncpg:** `IN (:ids)` becomes `= ANY($1)` and `NOT IN (:ids)` becomes
+  `<> ALL($1)`, with the list bound as an array. Elsewhere (`= ANY(:ids)`),
+  the list is simply passed as an array.
+- **Other drivers:** the generated function expands the list into one
+  placeholder per element at call time. An empty list becomes an empty
+  subquery, so `IN` matches no rows and `NOT IN` matches every row.
+- **Restrictions:** outside asyncpg, a list parameter may only appear as the
+  sole item of an `IN (...)`. List parameters need named placeholders, and
+  `:execmany` can't take them.
+
 ### Result columns
 
 `SELECT *` and `alias.*` expand from the schema. Expression columns are typed
