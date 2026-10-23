@@ -220,12 +220,14 @@ GROUP BY l.storeId, l.state
 HAVING COUNT(*) > :min_listings
 ORDER BY listings DESC;
 
--- JSON array built by string concatenation over GROUP_CONCAT, and JSON_ARRAYAGG.
+-- JSON array built by string concatenation over GROUP_CONCAT, and JSON_ARRAYAGG
+-- (MySQL 5.7.22+). JSON_ARRAYAGG over an empty LEFT JOIN yields [null], so the
+-- empty case is selected explicitly.
 -- name: pickup_listing_ids :one
 SELECT
     p.id AS pickup_id,
     CONCAT('[', COALESCE(GROUP_CONCAT(DISTINCT pl.listingId), ''), ']') AS listing_ids_json,
-    COALESCE(JSON_ARRAYAGG(pl.listingId), '[]') AS listing_ids
+    IF(COUNT(pl.listingId) = 0, JSON_ARRAY(), JSON_ARRAYAGG(pl.listingId)) AS listing_ids
 FROM pickups p
 LEFT JOIN pickup_listings pl ON pl.pickupId = p.id
 WHERE p.id = :pickup_id
@@ -278,6 +280,8 @@ ORDER BY happened_at DESC
 LIMIT :limit;
 
 -- ROW_NUMBER emulation with user variables (no window functions on 5.7).
+-- This mirrors the production shape; MySQL documents the evaluation order of
+-- user-variable assignments as undefined, so the result is best-effort.
 -- name: latest_offer_per_listing :many
 SELECT ranked.listing_id, ranked.amount
 FROM (
@@ -299,19 +303,20 @@ WHERE ranked.rn = 1;
 SELECT
     p.id AS pickup_id,
     DATE(CONVERT_TZ(p.scheduledFor, 'SYSTEM', s.timezone)) AS local_date,
-    DAYNAME(p.scheduledFor) AS weekday,
+    DAYNAME(CONVERT_TZ(p.scheduledFor, 'SYSTEM', s.timezone)) AS weekday,
     TIME(p.scheduledFor) AS scheduled_time
 FROM pickups p
 JOIN stores s ON s.id = p.storeId
 WHERE DATE(CONVERT_TZ(p.scheduledFor, 'SYSTEM', s.timezone)) = DATE(CONVERT_TZ(:day, 'UTC', s.timezone))
   AND p.scheduledFor BETWEEN :window_start AND :window_end
-  AND DAYNAME(p.scheduledFor) IN ('Saturday', 'Sunday');
+  AND DAYNAME(CONVERT_TZ(p.scheduledFor, 'SYSTEM', s.timezone)) IN ('Saturday', 'Sunday');
 
 -- Parameter inside CONCAT inside CONVERT_TZ.
 -- name: count_pickups_on_date :one
 SELECT COUNT(*) AS pickups
 FROM pickups p
-WHERE p.scheduledFor >= CONVERT_TZ(CONCAT(:day, 'T00:00:00'), :timezone, 'SYSTEM');
+WHERE p.scheduledFor >= CONVERT_TZ(CONCAT(:day, 'T00:00:00'), :timezone, 'SYSTEM')
+  AND p.scheduledFor < DATE_ADD(CONVERT_TZ(CONCAT(:day, 'T00:00:00'), :timezone, 'SYSTEM'), INTERVAL 1 DAY);
 
 -- INTERVAL arithmetic with literal and parameter counts, DATE_ADD/DATE_SUB,
 -- TIMESTAMPDIFF, UNIX_TIMESTAMP, FROM_UNIXTIME, DATE_FORMAT, STR_TO_DATE.
@@ -388,14 +393,14 @@ INSERT INTO account_counters (accountId, counterKey)
 VALUES (:account_id, :counter_key)
 ON DUPLICATE KEY UPDATE accountId = accountId;
 
--- Conditional upsert keeping the larger value.
+-- Conditional upsert keeping the larger values.
 -- name: record_offer_ceiling :execrows
 INSERT INTO account_counters (accountId, counterKey, hits, lastValue)
 VALUES (:account_id, 'ceiling', :hits, :value)
 ON DUPLICATE KEY UPDATE
+    hits = GREATEST(COALESCE(hits, 0), COALESCE(VALUES(hits), 0)),
     lastValue = IF(
-        GREATEST(COALESCE(hits, 0), COALESCE(lastValue, 0))
-            > GREATEST(COALESCE(VALUES(hits), 0), COALESCE(VALUES(lastValue), 0)),
+        COALESCE(lastValue, 0) > COALESCE(VALUES(lastValue), 0),
         lastValue,
         VALUES(lastValue)
     );
@@ -429,7 +434,12 @@ WHERE storeId IN (
     )
   AND scheduledFor < NOW() - INTERVAL 1 DAY
   AND arrivedAt IS NULL
-  AND NOT EXISTS (SELECT 1 FROM event_log e WHERE e.listingId = pickups.id);
+  AND NOT EXISTS (
+        SELECT 1
+        FROM pickup_listings pl2
+        JOIN event_log e ON e.listingId = pl2.listingId
+        WHERE pl2.pickupId = pickups.id
+    );
 
 -- name: delete_pickup_links :execrows
 DELETE FROM pickup_listings WHERE pickupId = :pickup_id AND listingId IN (:listing_ids);
