@@ -5,5 +5,6 @@ CREATE TABLE public.accounts (
     profile JSONB,
     tags TEXT[],
     score_matrix INTEGER[][] NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    trial_length INTERVAL
 );

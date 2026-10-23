@@ -13,6 +13,8 @@ pub enum SqlType {
     Date,
     Time,
     DateTime,
+    /// A duration such as PostgreSQL's `INTERVAL`.
+    Interval,
     Json,
     /// Unknown: the analyzer could not determine a type.
     Any,
@@ -29,11 +31,17 @@ impl SqlType {
         let upper = name.trim().to_uppercase();
         let base = upper.split('(').next().unwrap_or("").trim().to_string();
 
+        // Checked before the affinity fallbacks, which would read the "INT"
+        // in `INTERVAL` as an integer.
+        if base.starts_with("INTERVAL") {
+            return SqlType::Interval;
+        }
+
         match base.as_str() {
             "BOOL" | "BOOLEAN" => return SqlType::Bool,
             "SERIAL" | "SMALLSERIAL" | "BIGSERIAL" => return SqlType::Int,
             "DATE" => return SqlType::Date,
-            "TIME" => return SqlType::Time,
+            "TIME" | "TIMETZ" | "TIME WITH TIME ZONE" | "TIME WITHOUT TIME ZONE" => return SqlType::Time,
             "DATETIME" | "TIMESTAMP" | "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE"
             | "TIMESTAMP WITHOUT TIME ZONE" => return SqlType::DateTime,
             "JSON" | "JSONB" => return SqlType::Json,

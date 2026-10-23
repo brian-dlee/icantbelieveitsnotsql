@@ -221,6 +221,10 @@ impl<'c> TypeResolver<'c> {
                 self.imports.insert(String::from("datetime"));
                 String::from("datetime.datetime")
             }
+            SqlType::Interval => {
+                self.imports.insert(String::from("datetime"));
+                String::from("datetime.timedelta")
+            }
         }
     }
 }

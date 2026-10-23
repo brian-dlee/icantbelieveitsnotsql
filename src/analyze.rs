@@ -4,13 +4,14 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    AccessExpr, Assignment, AssignmentTarget, BinaryOperator, Delete, Expr, FromTable, Function,
+    AccessExpr, Assignment, AssignmentTarget, BinaryOperator, DateTimeField, Delete, Expr, FromTable, Function,
     FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert, JoinConstraint,
     JoinOperator, LimitClause, OnConflictAction, OnInsert, OrderByKind, Query,
     Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, Subscript, TableAlias,
     TableFactor, TableObject, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value,
 };
 
+use crate::dialect::SqlDialect;
 use crate::queryfile::is_identifier;
 use crate::schema::{object_name_last, Column, Schema, Table};
 use crate::types::{SqlType, TypeInfo};
@@ -274,13 +275,19 @@ fn array_element_declared_type(declared: &str) -> Option<String> {
 
 pub struct Analyzer<'s> {
     schema: &'s Schema,
+    dialect: SqlDialect,
     params: Vec<RawParam>,
     warnings: Vec<String>,
 }
 
-pub fn analyze_statement(statement: &Statement, schema: &Schema) -> Result<StatementAnalysis, String> {
+pub fn analyze_statement(
+    statement: &Statement,
+    schema: &Schema,
+    dialect: SqlDialect,
+) -> Result<StatementAnalysis, String> {
     let mut analyzer = Analyzer {
         schema,
+        dialect,
         params: Vec::new(),
         warnings: Vec::new(),
     };
@@ -332,9 +339,10 @@ pub fn analyze_statement(statement: &Statement, schema: &Schema) -> Result<State
 }
 
 /// Output columns of a `CREATE VIEW` body, for registering views as tables.
-pub fn analyze_view_columns(query: &Query, schema: &Schema) -> Result<Vec<Column>, String> {
+pub fn analyze_view_columns(query: &Query, schema: &Schema, dialect: SqlDialect) -> Result<Vec<Column>, String> {
     let mut analyzer = Analyzer {
         schema,
+        dialect,
         params: Vec::new(),
         warnings: Vec::new(),
     };
@@ -1175,7 +1183,9 @@ impl<'s> Analyzer<'s> {
                 UnaryOperator::Minus | UnaryOperator::Plus => {
                     let inner = self.walk_expr(expr, expected, hint, scope)?;
                     Ok(anonymous(
-                        if inner.type_info.sql_type.is_numeric() {
+                        if inner.type_info.sql_type.is_numeric()
+                            || inner.type_info.sql_type == SqlType::Interval
+                        {
                             inner.type_info.sql_type
                         } else {
                             SqlType::Numeric
@@ -1375,8 +1385,45 @@ impl<'s> Analyzer<'s> {
                 }
                 Ok(anonymous(SqlType::Any, true))
             }
-            Expr::TypedString { .. } => Ok(anonymous(SqlType::Text, false)),
-            Expr::Interval(_) => Ok(anonymous(SqlType::Any, true)),
+            Expr::TypedString(typed) => Ok(Column::new(
+                "",
+                TypeInfo {
+                    sql_type: SqlType::from_data_type(&typed.data_type),
+                    nullable: false,
+                    declared: Some(typed.data_type.to_string()),
+                },
+            )),
+            Expr::Interval(interval) => {
+                // `INTERVAL ? DAY` (MySQL) takes a count for a single unit;
+                // otherwise the value is an interval string such as '1 day'.
+                let single_unit = interval.last_field.is_none()
+                    && matches!(
+                        interval.leading_field,
+                        Some(
+                            DateTimeField::Year
+                                | DateTimeField::Quarter
+                                | DateTimeField::Month
+                                | DateTimeField::Week(_)
+                                | DateTimeField::Day
+                                | DateTimeField::Hour
+                                | DateTimeField::Minute
+                                | DateTimeField::Second
+                                | DateTimeField::Microsecond
+                        )
+                    );
+                let expected = typed_hint("", if single_unit { SqlType::Int } else { SqlType::Text });
+                let value = self.walk_expr(&interval.value, Some(&expected), None, scope)?;
+                Ok(anonymous(SqlType::Interval, value.type_info.nullable))
+            }
+            Expr::Extract { expr, .. } => {
+                let inner = self.walk_expr(expr, None, None, scope)?;
+                // PostgreSQL 14+ returns numeric; MySQL returns an integer.
+                let sql_type = match self.dialect {
+                    SqlDialect::MySQL => SqlType::Int,
+                    _ => SqlType::Numeric,
+                };
+                Ok(anonymous(sql_type, inner.type_info.nullable))
+            }
             Expr::Wildcard(_) | Expr::QualifiedWildcard(..) => Ok(anonymous(SqlType::Any, true)),
             other => {
                 self.warn(format!("expression `{}` is not understood; typed as Any", other));
@@ -1438,7 +1485,12 @@ impl<'s> Analyzer<'s> {
             }
             Plus | Minus | Multiply | Divide | Modulo => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
-                let sql_type = arithmetic_type(l.type_info.sql_type, r.type_info.sql_type);
+                let (a, b) = (l.type_info.sql_type, r.type_info.sql_type);
+                let sql_type = match self.dialect {
+                    SqlDialect::PostgreSQL => postgresql_temporal_arithmetic(op, a, b),
+                    _ => None,
+                }
+                .unwrap_or_else(|| arithmetic_type(a, b));
                 Ok(anonymous(sql_type, l.type_info.nullable || r.type_info.nullable))
             }
             StringConcat => {
@@ -1522,6 +1574,13 @@ impl<'s> Analyzer<'s> {
         }
 
         Ok(self.function_result(&name, &arg_types, has_wildcard))
+    }
+
+    fn dialect_temporal(&self, sql_type: SqlType) -> SqlType {
+        match self.dialect {
+            SqlDialect::SQLite => SqlType::Text,
+            _ => sql_type,
+        }
     }
 
     fn function_result(&mut self, name: &str, args: &[Column], has_wildcard: bool) -> Column {
@@ -1641,6 +1700,34 @@ impl<'s> Analyzer<'s> {
                 result
             }
             "percent_rank" | "cume_dist" => anonymous(SqlType::Float, false),
+            "now" | "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
+                anonymous(SqlType::DateTime, false)
+            }
+            // SQLite returns these as text; PostgreSQL and MySQL return temporal values.
+            "current_timestamp" | "localtimestamp" => anonymous(self.dialect_temporal(SqlType::DateTime), false),
+            "current_date" => anonymous(self.dialect_temporal(SqlType::Date), false),
+            "current_time" | "localtime" => anonymous(self.dialect_temporal(SqlType::Time), false),
+            "date_trunc" => {
+                // Intervals (and times, which PostgreSQL casts to interval)
+                // yield an interval; dates and timestamps yield a timestamp.
+                let source = args.get(1).map(|a| a.type_info.sql_type);
+                let sql_type = if matches!(source, Some(SqlType::Interval | SqlType::Time)) {
+                    SqlType::Interval
+                } else {
+                    SqlType::DateTime
+                };
+                anonymous(sql_type, any_nullable)
+            }
+            "date_bin" | "to_timestamp" | "make_timestamp" | "make_timestamptz" => {
+                anonymous(SqlType::DateTime, any_nullable)
+            }
+            "to_date" | "make_date" => anonymous(SqlType::Date, any_nullable),
+            "make_time" => anonymous(SqlType::Time, any_nullable),
+            "age" | "make_interval" | "justify_days" | "justify_hours" | "justify_interval" => {
+                anonymous(SqlType::Interval, any_nullable)
+            }
+            "date_part" => anonymous(SqlType::Float, any_nullable),
+            "to_char" => anonymous(SqlType::Text, any_nullable),
             _ => {
                 let _ = has_wildcard;
                 self.warn(format!(
@@ -1680,9 +1767,45 @@ fn unify_columns(a: &Column, b: &Column) -> Column {
     }
 }
 
+/// PostgreSQL's date/time operators, or `None` when the operands are not temporal.
+fn postgresql_temporal_arithmetic(op: &BinaryOperator, a: SqlType, b: SqlType) -> Option<SqlType> {
+    use SqlType::*;
+    let numeric = |t: SqlType| matches!(t, Int | Float | Numeric);
+    match op {
+        BinaryOperator::Plus => match (a, b) {
+            (DateTime, Interval) | (Interval, DateTime) => Some(DateTime),
+            (Date, Interval) | (Interval, Date) => Some(DateTime),
+            (Date, Time) | (Time, Date) => Some(DateTime),
+            (Date, Int) | (Int, Date) => Some(Date),
+            (Time, Interval) | (Interval, Time) => Some(Time),
+            (Interval, Interval) => Some(Interval),
+            _ => None,
+        },
+        BinaryOperator::Minus => match (a, b) {
+            (DateTime, Interval) | (Date, Interval) => Some(DateTime),
+            (DateTime, DateTime) | (DateTime, Date) | (Date, DateTime) => Some(Interval),
+            (Date, Date) => Some(Int),
+            (Date, Int) => Some(Date),
+            (Time, Time) => Some(Interval),
+            (Time, Interval) => Some(Time),
+            (Interval, Interval) => Some(Interval),
+            _ => None,
+        },
+        BinaryOperator::Multiply => match (a, b) {
+            (Interval, t) | (t, Interval) if numeric(t) => Some(Interval),
+            _ => None,
+        },
+        BinaryOperator::Divide => match (a, b) {
+            (Interval, t) if numeric(t) => Some(Interval),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn arithmetic_type(a: SqlType, b: SqlType) -> SqlType {
     use SqlType::*;
-    if a == Any || b == Any {
+    if a == Any || b == Any || a == Interval || b == Interval {
         return Any;
     }
     if a == Float || b == Float {
@@ -1716,6 +1839,11 @@ fn function_arg_expectation(
         | "json" | "json_extract" | "json_valid" | "json_type" | "json_array_length" => text(),
         "array_length" | "array_lower" | "array_upper" if index == 1 => int(),
         "array_position" if index == 2 => int(),
+        "date_trunc" | "date_part" if index == 0 => text(),
+        "to_char" | "to_date" | "to_timestamp" if index == 1 => text(),
+        "to_date" => text(),
+        "age" => Some(typed_hint("", SqlType::DateTime)),
+        "make_date" => int(),
         "substr" | "substring" => {
             if index == 0 {
                 text()
