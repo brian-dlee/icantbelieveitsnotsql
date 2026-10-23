@@ -16,3 +16,8 @@ SELECT id, name FROM widgets ORDER BY id;
 -- name: reset_widgets :exec
 SET lock_timeout = '5s';
 DELETE FROM widgets;
+
+-- Casts are a single `::` token, so a parameter named like the cast type
+-- (`text` here) never captures the type name.
+-- name: find_by_label :many
+SELECT id, 1::text AS one_text FROM widgets WHERE name = :text AND meta = :meta::jsonb;

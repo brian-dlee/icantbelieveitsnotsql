@@ -140,3 +140,36 @@ async def reset_widgets(
     """Runs `reset_widgets`."""
     await connection.execute(RESET_WIDGETS_1)
     await connection.execute(RESET_WIDGETS_2)
+
+
+# ---- find_by_label (:many) ----
+
+
+class FindByLabelRow(pydantic.BaseModel):
+    """One result row of `find_by_label`."""
+
+    id: int
+    one_text: str
+
+
+class FindByLabelParams(pydantic.BaseModel):
+    """Parameters of `find_by_label`."""
+
+    text: str
+    meta: str
+
+
+FIND_BY_LABEL = """
+SELECT id, 1::text AS one_text FROM widgets WHERE name = $1 AND meta = $2::jsonb
+"""
+
+
+async def find_by_label(
+    connection: asyncpg.Connection | asyncpg.Pool,
+    *,
+    text: str,
+    meta: str,
+) -> list[FindByLabelRow]:
+    """Runs `find_by_label`."""
+    params = tuple(FindByLabelParams(text=text, meta=meta).model_dump(by_alias=True).values())
+    return [FindByLabelRow.model_validate(_row_dict(FindByLabelRow, row)) for row in await connection.fetch(FIND_BY_LABEL, *params)]
