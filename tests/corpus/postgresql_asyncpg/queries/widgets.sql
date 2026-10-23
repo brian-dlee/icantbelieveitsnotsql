@@ -29,3 +29,14 @@ WHERE ($1::text IS NULL OR name = $1)
   AND (($2::bigint) IS NULL OR id < $2)
 ORDER BY id DESC
 LIMIT $3;
+
+-- asyncpg binds lists as arrays: IN becomes = ANY, NOT IN becomes <> ALL.
+-- name: widgets_by_ids :many
+-- param: ids list[int]
+-- param: excluded list[str]
+SELECT id, name FROM widgets WHERE id IN (:ids) AND name NOT IN (:excluded) ORDER BY id;
+
+-- A list used outside IN is passed through as an array.
+-- name: widgets_in_array :many
+-- param: ids list[int]
+SELECT id FROM widgets WHERE id = ANY(:ids);

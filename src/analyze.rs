@@ -1315,6 +1315,14 @@ impl<'s> Analyzer<'s> {
                 result.name = String::new();
                 Ok(result)
             }
+            // `x = ANY(array_or_subquery)` / `x <> ALL(...)`. An array
+            // placeholder's type can't be inferred; declare it with
+            // `-- param: <name> list[...]`.
+            Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
+                let l = self.walk_expr(left, None, None, scope)?;
+                let r = self.walk_expr(right, None, None, scope)?;
+                Ok(anonymous(SqlType::Bool, l.type_info.nullable || r.type_info.nullable))
+            }
             Expr::Exists { subquery, .. } => {
                 self.analyze_query(subquery, Some(scope))?;
                 Ok(anonymous(SqlType::Bool, false))

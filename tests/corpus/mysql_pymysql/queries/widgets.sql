@@ -15,3 +15,10 @@ LIMIT :limit;
 -- No parameters: the driver skips interpolation, so `%` stays as written.
 -- name: count_with_a :one
 SELECT COUNT(*) AS n FROM widgets WHERE name LIKE '%a%';
+
+-- List parameters expand at call time; an empty list matches nothing for IN
+-- and everything for NOT IN.
+-- name: widgets_by_ids :many
+-- param: ids list[int]
+-- param: excluded list[str]
+SELECT id, name FROM widgets WHERE id IN (:ids) AND name NOT IN ( :excluded ) ORDER BY id;

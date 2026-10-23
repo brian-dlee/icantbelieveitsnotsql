@@ -211,3 +211,66 @@ async def search_widgets(
     """Runs `search_widgets`."""
     params = tuple(SearchWidgetsParams(name=name, id=id, limit=limit).model_dump(by_alias=True).values())
     return [SearchWidgetsRow.model_validate(_row_dict(SearchWidgetsRow, row)) for row in await connection.fetch(SEARCH_WIDGETS, *params)]
+
+
+# ---- widgets_by_ids (:many) ----
+
+
+class WidgetsByIdsRow(pydantic.BaseModel):
+    """One result row of `widgets_by_ids`."""
+
+    id: int
+    name: str
+
+
+class WidgetsByIdsParams(pydantic.BaseModel):
+    """Parameters of `widgets_by_ids`."""
+
+    ids: list[int]
+    excluded: list[str]
+
+
+WIDGETS_BY_IDS = """
+SELECT id, name FROM widgets WHERE id = ANY($1) AND name <> ALL($2) ORDER BY id
+"""
+
+
+async def widgets_by_ids(
+    connection: asyncpg.Connection | asyncpg.Pool,
+    *,
+    ids: list[int],
+    excluded: list[str],
+) -> list[WidgetsByIdsRow]:
+    """Runs `widgets_by_ids`."""
+    params = tuple(WidgetsByIdsParams(ids=ids, excluded=excluded).model_dump(by_alias=True).values())
+    return [WidgetsByIdsRow.model_validate(_row_dict(WidgetsByIdsRow, row)) for row in await connection.fetch(WIDGETS_BY_IDS, *params)]
+
+
+# ---- widgets_in_array (:many) ----
+
+
+class WidgetsInArrayRow(pydantic.BaseModel):
+    """One result row of `widgets_in_array`."""
+
+    id: int
+
+
+class WidgetsInArrayParams(pydantic.BaseModel):
+    """Parameters of `widgets_in_array`."""
+
+    ids: list[int]
+
+
+WIDGETS_IN_ARRAY = """
+SELECT id FROM widgets WHERE id = ANY($1)
+"""
+
+
+async def widgets_in_array(
+    connection: asyncpg.Connection | asyncpg.Pool,
+    *,
+    ids: list[int],
+) -> list[WidgetsInArrayRow]:
+    """Runs `widgets_in_array`."""
+    params = tuple(WidgetsInArrayParams(ids=ids).model_dump(by_alias=True).values())
+    return [WidgetsInArrayRow.model_validate(_row_dict(WidgetsInArrayRow, row)) for row in await connection.fetch(WIDGETS_IN_ARRAY, *params)]

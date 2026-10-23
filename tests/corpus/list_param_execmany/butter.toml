@@ -1,0 +1,7 @@
+[generate]
+dialect = "mysql"
+queries-dir = "queries"
+schema-files = ["schema.sql"]
+
+[generate.python]
+output-dir = "out"

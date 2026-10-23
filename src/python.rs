@@ -20,7 +20,7 @@ const PYTHON_KEYWORDS: &[&str] = &[
 ];
 
 /// Names the generated function bodies use for their own locals.
-const RESERVED_PARAM_NAMES: &[&str] = &["cursor", "connection", "rows", "row", "params", "self", "cls"];
+const RESERVED_PARAM_NAMES: &[&str] = &["cursor", "connection", "rows", "row", "params", "sql", "query_params", "self", "cls"];
 
 /// The database driver the generated functions call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -455,6 +455,19 @@ fn render_model(out: &mut String, class_name: &str, fields: &[FieldSpec], doc: &
     out.push_str("\n\n");
 }
 
+/// Parameters declared with a `list[...]` type (`-- param: ids list[int]`).
+fn list_params(unit: &QueryUnit) -> Vec<String> {
+    unit.params
+        .iter()
+        .filter(|p| {
+            unit.param_overrides
+                .iter()
+                .any(|(name, ty)| name == &p.name && ty.trim_start().starts_with("list["))
+        })
+        .map(|p| p.name.clone())
+        .collect()
+}
+
 fn sql_constant_name(unit: &QueryUnit, index: usize) -> String {
     let base = unit.name.to_uppercase();
     if unit.statements.len() == 1 {
@@ -464,13 +477,29 @@ fn sql_constant_name(unit: &QueryUnit, index: usize) -> String {
     }
 }
 
+/// Writes the SQL constants and returns, per statement, the list parameters
+/// the generated code must expand before executing it.
 fn render_sql_constants(
     out: &mut String,
     unit: &QueryUnit,
     driver: Driver,
     dialect: SqlDialect,
-) -> Result<(), String> {
+) -> Result<Vec<Vec<String>>, String> {
     let parser_dialect = dialect.parser_dialect();
+    let lists = list_params(unit);
+    if !lists.is_empty() {
+        if unit.command == Command::ExecMany {
+            return Err(format!("query `{}`: `:execmany` cannot take list parameters", unit.name));
+        }
+        if unit.positional && driver != Driver::Asyncpg {
+            return Err(format!(
+                "query `{}`: list parameters need named placeholders (`:name`), not `?`",
+                unit.name
+            ));
+        }
+    }
+
+    let mut expansions = Vec::new();
     for (index, statement) in unit.statements.iter().enumerate() {
         let bound = !unit.params.is_empty() && statement.has_params;
         let sql = paramstyle::rewrite(
@@ -478,9 +507,20 @@ fn render_sql_constants(
             parser_dialect.as_ref(),
             driver.param_style(),
             &unit.params,
+            &lists,
             bound,
         )
         .map_err(|message| format!("query `{}`: {}", unit.name, message))?;
+        let expand: Vec<String> = if driver == Driver::Asyncpg {
+            Vec::new()
+        } else {
+            lists
+                .iter()
+                .filter(|name| sql.contains(&paramstyle::list_token(driver.param_style(), name)))
+                .cloned()
+                .collect()
+        };
+        expansions.push(expand);
         out.push_str(&format!(
             "{} = \"\"\"\n{}\n\"\"\"\n\n",
             sql_constant_name(unit, index),
@@ -488,7 +528,7 @@ fn render_sql_constants(
         ));
     }
     out.push('\n');
-    Ok(())
+    Ok(expansions)
 }
 
 fn render_function(
@@ -498,6 +538,7 @@ fn render_function(
     params_class: &str,
     fields: &[FieldSpec],
     driver: Driver,
+    expansions: &[Vec<String>],
 ) -> Result<(), String> {
     let pg = driver == Driver::Asyncpg;
     if pg && unit.command == Command::ExecLastId {
@@ -646,7 +687,21 @@ fn render_function(
     }
 
     for (index, statement) in unit.statements.iter().enumerate() {
-        if has_params && statement.has_params {
+        let expand = expansions.get(index).filter(|names| !names.is_empty());
+        if let Some(names) = expand {
+            let quoted: Vec<String> = names.iter().map(|n| format!("{:?}", n)).collect();
+            let tuple = if quoted.len() == 1 {
+                format!("({},)", quoted[0])
+            } else {
+                format!("({})", quoted.join(", "))
+            };
+            out.push_str(&format!(
+                "    sql, query_params = _expand_lists({}, params, {})\n",
+                sql_constant_name(unit, index),
+                tuple
+            ));
+            out.push_str(&format!("    {}cursor.execute(sql, query_params)\n", wait));
+        } else if has_params && statement.has_params {
             out.push_str(&format!(
                 "    {}cursor.execute({}, params)\n",
                 wait,
@@ -694,6 +749,7 @@ pub fn render_module(
             _ => None,
         });
     let mut body = String::new();
+    let mut needs_list_helper = false;
     let needs_row_helper = module.units.iter().any(|u| u.command.returns_rows());
     if needs_row_helper {
         resolver.imports.insert(String::from("typing"));
@@ -747,8 +803,12 @@ pub fn render_module(
             );
         }
 
-        render_sql_constants(&mut body, unit, driver, dialect)?;
-        render_function(&mut body, unit, &row_class, &params_class, &param_specs, driver)?;
+        let expansions = render_sql_constants(&mut body, unit, driver, dialect)?;
+        if expansions.iter().any(|names| !names.is_empty()) {
+            needs_list_helper = true;
+            resolver.imports.insert(String::from("typing"));
+        }
+        render_function(&mut body, unit, &row_class, &params_class, &param_specs, driver, &expansions)?;
         body.push_str("\n\n");
     }
 
@@ -785,6 +845,37 @@ pub fn render_module(
         out.push_str("    \"\"\"Reads the row count from an asyncpg command tag such as `UPDATE 3` or `INSERT 0 2`.\"\"\"\n");
         out.push_str("    count = tag.rsplit(\" \", 1)[-1]\n");
         out.push_str("    return int(count) if count.isdigit() else 0\n\n");
+    }
+
+    if needs_list_helper {
+        // Python f-strings for one element placeholder and for the list token.
+        let (element, token, empty) = match driver {
+            Driver::Pymysql | Driver::Aiomysql => (
+                "f\"%({key})s\"",
+                "f\"(%({name})s)\"",
+                "(SELECT NULL FROM DUAL WHERE FALSE)",
+            ),
+            _ => ("f\":{key}\"", "f\"(:{name})\"", "(SELECT NULL WHERE 0)"),
+        };
+        out.push_str("\ndef _expand_lists(\n");
+        out.push_str("    sql: str, params: dict[str, typing.Any], names: tuple[str, ...]\n");
+        out.push_str(") -> tuple[str, dict[str, typing.Any]]:\n");
+        out.push_str("    \"\"\"Expands each list parameter into one placeholder per element.\n\n");
+        out.push_str("    An empty list becomes an empty subquery, so `IN` matches nothing and `NOT IN` everything.\n");
+        out.push_str("    \"\"\"\n");
+        out.push_str("    expanded = {key: value for key, value in params.items() if key not in names}\n");
+        out.push_str("    for name in names:\n");
+        out.push_str("        keys = [f\"{name}__{index}\" for index in range(len(params[name]))]\n");
+        out.push_str("        expanded.update(zip(keys, params[name], strict=True))\n");
+        out.push_str(&format!(
+            "        placeholders = \", \".join({} for key in keys)\n",
+            element
+        ));
+        out.push_str(&format!(
+            "        sql = sql.replace({}, f\"({{placeholders}})\" if keys else {:?})\n",
+            token, empty
+        ));
+        out.push_str("    return sql, expanded\n\n");
     }
 
     if needs_row_helper {
