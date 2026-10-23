@@ -21,3 +21,11 @@ DELETE FROM widgets;
 -- (`text` here) never captures the type name.
 -- name: find_by_label :many
 SELECT id, 1::text AS one_text FROM widgets WHERE name = :text AND meta = :meta::jsonb;
+
+-- Optional filters: a cast or parentheses around the placeholder still make it nullable.
+-- name: search_widgets :many
+SELECT id FROM widgets
+WHERE ($1::text IS NULL OR name = $1)
+  AND (($2::bigint) IS NULL OR id < $2)
+ORDER BY id DESC
+LIMIT $3;

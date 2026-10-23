@@ -173,3 +173,41 @@ async def find_by_label(
     """Runs `find_by_label`."""
     params = tuple(FindByLabelParams(text=text, meta=meta).model_dump(by_alias=True).values())
     return [FindByLabelRow.model_validate(_row_dict(FindByLabelRow, row)) for row in await connection.fetch(FIND_BY_LABEL, *params)]
+
+
+# ---- search_widgets (:many) ----
+
+
+class SearchWidgetsRow(pydantic.BaseModel):
+    """One result row of `search_widgets`."""
+
+    id: int
+
+
+class SearchWidgetsParams(pydantic.BaseModel):
+    """Parameters of `search_widgets`."""
+
+    name: str | None = pydantic.Field(default=None)
+    id: int | None = pydantic.Field(default=None)
+    limit: int
+
+
+SEARCH_WIDGETS = """
+SELECT id FROM widgets
+WHERE ($1::text IS NULL OR name = $1)
+  AND (($2::bigint) IS NULL OR id < $2)
+ORDER BY id DESC
+LIMIT $3
+"""
+
+
+async def search_widgets(
+    connection: asyncpg.Connection | asyncpg.Pool,
+    *,
+    name: str | None = None,
+    id: int | None = None,
+    limit: int,
+) -> list[SearchWidgetsRow]:
+    """Runs `search_widgets`."""
+    params = tuple(SearchWidgetsParams(name=name, id=id, limit=limit).model_dump(by_alias=True).values())
+    return [SearchWidgetsRow.model_validate(_row_dict(SearchWidgetsRow, row)) for row in await connection.fetch(SEARCH_WIDGETS, *params)]

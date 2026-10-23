@@ -332,6 +332,26 @@ fn schema_type_affinity() {
 }
 
 #[test]
+fn optional_filter_sees_through_casts_and_parentheses() {
+    let analysis = ok(
+        "SELECT id FROM users WHERE (CAST(:name AS TEXT) IS NULL OR name = :name) AND ((:min_age) IS NULL OR age > :min_age)",
+    );
+    assert_eq!(
+        param_summary(&analysis),
+        vec![("name".into(), SqlType::Text, true), ("min_age".into(), SqlType::Int, true)]
+    );
+}
+
+#[test]
+fn is_not_null_test_also_marks_an_optional_filter() {
+    // Testing a parameter for NULL either way means callers may pass None.
+    let analysis = ok(
+        "SELECT id FROM users WHERE (CAST(:name AS TEXT) IS NOT NULL AND name = :name) OR CAST(:name AS TEXT) IS NULL",
+    );
+    assert_eq!(param_summary(&analysis), vec![("name".into(), SqlType::Text, true)]);
+}
+
+#[test]
 fn sqlite_current_time_keywords_are_text() {
     let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(

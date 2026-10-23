@@ -381,6 +381,11 @@ impl<'s> Analyzer<'s> {
     }
 
     fn mark_nullable(&mut self, expr: &Expr) {
+        // `$1::text IS NULL` and `(:x) IS NULL` test the placeholder itself.
+        let mut expr = expr;
+        while let Expr::Cast { expr: inner, .. } | Expr::Nested(inner) = expr {
+            expr = inner;
+        }
         if let Expr::Value(v) = expr {
             if let Value::Placeholder(token) = &v.value {
                 let span = (v.span.start.line, v.span.start.column);
