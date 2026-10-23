@@ -267,7 +267,7 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
     // Views need every table first, so they are resolved after the file pass.
     for (path, line, statement) in &views {
         if let Statement::CreateView { name, columns, query, .. } = statement {
-            match analyze_view_columns(query, &schema) {
+            match analyze_view_columns(query, &schema, dialect) {
                 Ok(mut view_columns) => {
                     for (column, def) in view_columns.iter_mut().zip(columns.iter()) {
                         column.name = def.name.value.clone();
@@ -304,7 +304,15 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
             }
             seen_names.push(name.clone());
 
-            match build_unit(&file.relative_path, block, command, &parsed.statements, &schema, &mut warnings) {
+            match build_unit(
+                &file.relative_path,
+                block,
+                command,
+                &parsed.statements,
+                &schema,
+                dialect,
+                &mut warnings,
+            ) {
                 Ok(unit) => units.push(unit),
                 Err(diagnostics) => errors.extend(diagnostics),
             }
@@ -391,6 +399,7 @@ fn build_unit(
     command: Command,
     statements: &[(RawStatement, Statement)],
     schema: &Schema,
+    dialect: SqlDialect,
     warnings: &mut Vec<Diagnostic>,
 ) -> Result<QueryUnit, Vec<Diagnostic>> {
     let name = block.name.clone().unwrap_or_default();
@@ -422,7 +431,7 @@ fn build_unit(
     let mut positional = false;
 
     for (raw, statement) in statements {
-        let analysis = match analyze_statement(statement, schema) {
+        let analysis = match analyze_statement(statement, schema, dialect) {
             Ok(analysis) => analysis,
             Err(message) => {
                 errors.push(Diagnostic::new(path, raw.line, format!("{}: {}", name, message)));

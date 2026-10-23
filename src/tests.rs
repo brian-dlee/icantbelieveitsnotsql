@@ -6,6 +6,7 @@ use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
 
 use crate::analyze::{analyze_statement, StatementAnalysis};
+use crate::dialect::SqlDialect;
 use crate::queryfile::{parse_query_file, Command};
 use crate::schema::Schema;
 use crate::types::SqlType;
@@ -38,7 +39,7 @@ fn schema() -> Schema {
 
 fn analyze(sql: &str) -> Result<StatementAnalysis, String> {
     let statements = Parser::parse_sql(&SQLiteDialect {}, sql).expect("sql parses");
-    analyze_statement(&statements[0], &schema())
+    analyze_statement(&statements[0], &schema(), SqlDialect::SQLite)
 }
 
 fn ok(sql: &str) -> StatementAnalysis {
@@ -325,6 +326,23 @@ fn schema_type_affinity() {
     assert_eq!(SqlType::from_type_name("DATETIME"), SqlType::DateTime);
     assert_eq!(SqlType::from_type_name("TIMESTAMP"), SqlType::DateTime);
     assert_eq!(SqlType::from_type_name("JSON"), SqlType::Json);
+    assert_eq!(SqlType::from_type_name("INTERVAL"), SqlType::Interval);
+    assert_eq!(SqlType::from_type_name("INTERVAL DAY TO SECOND"), SqlType::Interval);
+    assert_eq!(SqlType::from_type_name("TIMETZ"), SqlType::Time);
+}
+
+#[test]
+fn sqlite_current_time_keywords_are_text() {
+    let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
+    assert_eq!(
+        column_summary(&analysis),
+        vec![
+            ("ts".into(), SqlType::Text, false),
+            ("d".into(), SqlType::Text, false),
+            ("t".into(), SqlType::Text, false),
+        ]
+    );
+    assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
 }
 
 // ------------------------------------------------------------- query files
