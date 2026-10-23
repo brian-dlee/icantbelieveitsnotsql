@@ -125,6 +125,7 @@ WHERE id = ANY($1::bigint[])
 RETURNING id, stream_key;
 
 -- Compare-and-set on a jsonb value; caller reads the affected-row count.
+-- Plain `=` mirrors the production shape: a NULL expected value never matches.
 -- name: swap_schedule :execrows
 UPDATE worker_state
 SET schedule = $3::jsonb, run_count = run_count + 1
@@ -135,13 +136,15 @@ INSERT INTO audit_entries (actor, action, details) VALUES ($1, $2, $3::jsonb);
 
 -- ------------------------------------------------------------------- reads
 
--- Row lock, then SKIP LOCKED before LIMIT.
+-- Plain row lock on a single row.
 -- name: lock_worker :one
 SELECT worker_name, enabled, schedule, runtime
 FROM worker_state
 WHERE worker_name = $1
 FOR UPDATE;
 
+-- Claim by stream: locks only the stream row `s` (not the outbox rows),
+-- with SKIP LOCKED placed before LIMIT.
 -- name: claim_pending :many
 SELECT o.id, o.topic, o.stream_key, o.payload, o.attributes
 FROM outbox o
