@@ -352,6 +352,29 @@ fn is_not_null_test_also_marks_an_optional_filter() {
 }
 
 #[test]
+fn numeric_style_rewrites_positional_list_parameters() {
+    use crate::analyze::Param;
+    use crate::paramstyle::{rewrite, ParamStyle};
+    use crate::types::TypeInfo;
+
+    let param = |name: &str| Param {
+        name: name.into(),
+        type_info: TypeInfo::not_null(SqlType::Int),
+        source: None,
+    };
+    let sql = rewrite(
+        "SELECT id FROM users WHERE age > ? AND id NOT IN (?)",
+        &sqlparser::dialect::GenericDialect {},
+        ParamStyle::Numeric,
+        &[param("age"), param("id")],
+        &["id".to_string()],
+        true,
+    )
+    .unwrap();
+    assert_eq!(sql, "SELECT id FROM users WHERE age > $1 AND id <> ALL($2)");
+}
+
+#[test]
 fn sqlite_current_time_keywords_are_text() {
     let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(

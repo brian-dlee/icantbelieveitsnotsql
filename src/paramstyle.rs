@@ -132,8 +132,14 @@ pub fn rewrite(
         let mut start = offset(tokens[first].span.start);
         let mut end = offset(tokens[last].span.end);
 
+        if text == "?" {
+            question_index += 1;
+        }
         let list_name = match text.as_str() {
-            "?" => None,
+            "?" => params
+                .get(question_index - 1)
+                .filter(|p| lists.contains(&p.name))
+                .map(|p| p.name.clone()),
             numbered if is_numbered(numbered) => {
                 let position = numbered[1..].parse::<usize>().unwrap_or(0);
                 params
@@ -177,10 +183,7 @@ pub fn rewrite(
             match (style, text.as_str()) {
                 (ParamStyle::Native, _) => text.clone(),
                 (ParamStyle::Pyformat, "?") => String::from("%s"),
-                (ParamStyle::Numeric, "?") => {
-                    question_index += 1;
-                    format!("${}", question_index)
-                }
+                (ParamStyle::Numeric, "?") => format!("${}", question_index),
                 (ParamStyle::Numeric, numbered) if is_numbered(numbered) => numbered.to_string(),
                 (ParamStyle::Pyformat, numbered) if is_numbered(numbered) => {
                     return Err(format!(
