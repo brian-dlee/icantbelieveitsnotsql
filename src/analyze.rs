@@ -1687,10 +1687,10 @@ impl<'s> Analyzer<'s> {
             "current_date" => anonymous(self.dialect_temporal(SqlType::Date), false),
             "current_time" | "localtime" => anonymous(self.dialect_temporal(SqlType::Time), false),
             "date_trunc" => {
-                // Truncating an interval yields an interval; dates and
-                // timestamps yield a timestamp.
+                // Intervals (and times, which PostgreSQL casts to interval)
+                // yield an interval; dates and timestamps yield a timestamp.
                 let source = args.get(1).map(|a| a.type_info.sql_type);
-                let sql_type = if source == Some(SqlType::Interval) {
+                let sql_type = if matches!(source, Some(SqlType::Interval | SqlType::Time)) {
                     SqlType::Interval
                 } else {
                     SqlType::DateTime

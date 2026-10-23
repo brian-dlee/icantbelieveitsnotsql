@@ -23,6 +23,7 @@ class InspectDatetimesRow(pydantic.BaseModel):
     checked_on: datetime.date
     created_day: datetime.datetime
     trial_hours: datetime.timedelta | None
+    truncated_time: datetime.timedelta
     created_year: float
     created_weekday: float
     account_age: datetime.timedelta
@@ -50,6 +51,7 @@ SELECT
     current_date AS checked_on,
     date_trunc('day', created_at) AS created_day,
     date_trunc('hour', trial_length) AS trial_hours,
+    date_trunc('hour', TIME '12:34:56') AS truncated_time,
     EXTRACT(YEAR FROM created_at) AS created_year,
     date_part('dow', created_at) AS created_weekday,
     age(now(), created_at) AS account_age,
