@@ -126,7 +126,7 @@ async def list_widgets(
 # ---- reset_widgets (:exec) ----
 
 RESET_WIDGETS_1 = """
-SET LOCAL lock_timeout = '5s'
+SET lock_timeout = '5s'
 """
 
 RESET_WIDGETS_2 = """

@@ -14,5 +14,5 @@ SELECT id, name FROM widgets ORDER BY id;
 
 -- Several statements share one session, so this takes a Connection, not a Pool.
 -- name: reset_widgets :exec
-SET LOCAL lock_timeout = '5s';
+SET lock_timeout = '5s';
 DELETE FROM widgets;
