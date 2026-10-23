@@ -4,7 +4,7 @@
 import datetime
 import typing
 
-import aiosqlite
+import asyncpg
 import pydantic
 
 
@@ -72,11 +72,10 @@ WHERE created_at >= date_trunc('day', $1::timestamptz)
 
 
 async def inspect_datetimes(
-    cursor: aiosqlite.Cursor,
+    connection: asyncpg.Connection | asyncpg.Pool,
     *,
     param_1: datetime.datetime,
 ) -> list[InspectDatetimesRow]:
     """Runs `inspect_datetimes`."""
     params = tuple(InspectDatetimesParams(param_1=param_1).model_dump(by_alias=True).values())
-    await cursor.execute(INSPECT_DATETIMES, params)
-    return [InspectDatetimesRow.model_validate(_row_dict(InspectDatetimesRow, row)) for row in await cursor.fetchall()]
+    return [InspectDatetimesRow.model_validate(_row_dict(InspectDatetimesRow, row)) for row in await connection.fetch(INSPECT_DATETIMES, *params)]

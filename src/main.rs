@@ -3,6 +3,7 @@ mod config;
 mod dialect;
 mod error;
 mod generate;
+mod paramstyle;
 mod python;
 mod queryfile;
 mod schema;

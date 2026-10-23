@@ -3,13 +3,14 @@
 
 import typing
 
-import aiosqlite
+import aiomysql
 import pydantic
 
 
 def _row_dict(model: type[pydantic.BaseModel], row: typing.Sequence[object]) -> dict[str, object]:
     """Maps a result row onto the model's fields by position, so unaliased expressions work."""
-    return dict(zip(model.model_fields, row, strict=True))
+    values = list(row.values()) if isinstance(row, dict) else row
+    return dict(zip(model.model_fields, values, strict=True))
 
 
 # ---- find_account (:one) ----
@@ -35,13 +36,13 @@ class FindAccountParams(pydantic.BaseModel):
 FIND_ACCOUNT = """
 SELECT id, email, profile, status, balance
 FROM accounts
-WHERE email = ?
-LIMIT ?
+WHERE email = %s
+LIMIT %s
 """
 
 
 async def find_account(
-    cursor: aiosqlite.Cursor,
+    cursor: aiomysql.Cursor,
     *,
     email: str,
     limit: int,

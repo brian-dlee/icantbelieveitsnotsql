@@ -3,7 +3,7 @@
 
 import typing
 
-import aiosqlite
+import asyncpg
 import pydantic
 
 
@@ -42,7 +42,7 @@ WHERE id > $2 AND (email = $1 OR lower(email) = lower($1)) AND tags = $3
 
 
 async def find_account(
-    cursor: aiosqlite.Cursor,
+    connection: asyncpg.Connection | asyncpg.Pool,
     *,
     email: str,
     id: int,
@@ -50,6 +50,5 @@ async def find_account(
 ) -> FindAccountRow | None:
     """Runs `find_account`."""
     params = tuple(FindAccountParams(email=email, id=id, tags=tags).model_dump(by_alias=True).values())
-    await cursor.execute(FIND_ACCOUNT, params)
-    row = await cursor.fetchone()
+    row = await connection.fetchrow(FIND_ACCOUNT, *params)
     return FindAccountRow.model_validate(_row_dict(FindAccountRow, row)) if row is not None else None

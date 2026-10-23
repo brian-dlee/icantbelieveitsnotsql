@@ -121,13 +121,8 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
     })?;
     let python_config = &python_config;
 
-    if python_config.driver != "aiosqlite" {
-        return Err(ButterError::Config(format!(
-            "{}: unsupported python driver `{}`; only `aiosqlite` is available",
-            config_path.display(),
-            python_config.driver
-        )));
-    }
+    let driver = python::Driver::resolve(python_config.driver.as_deref(), dialect)
+        .map_err(|message| ButterError::Config(format!("{}: {}", config_path.display(), message)))?;
 
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut warnings: Vec<Diagnostic> = Vec::new();
@@ -347,7 +342,7 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
     let mut rendered: Vec<(PathBuf, String)> = Vec::new();
 
     for module in &modules {
-        let code = python::render_module(module, python_config).map_err(|message| {
+        let code = python::render_module(module, python_config, dialect, driver).map_err(|message| {
             ButterError::Diagnostics(vec![Diagnostic::new(&module.source, 0, message)])
         })?;
         let output_path = output_dir.join(format!("{}.py", module.stem));
