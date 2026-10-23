@@ -100,8 +100,8 @@ SET runtime = COALESCE(w.runtime, '{}'::jsonb) || jsonb_build_object('last_error
 
 -- ------------------------------------------------------------------ writes
 
--- Callers run ensure_stream for the stream_key first: claim_pending inner-joins
--- outbox_streams, so an outbox row without a stream row is never claimed.
+-- Assumes an outbox_streams row already exists for the stream_key:
+-- claim_pending inner-joins outbox_streams and skips outbox rows without one.
 -- name: enqueue :one
 INSERT INTO outbox (topic, stream_key, payload, attributes)
 VALUES ($1, $2, $3::jsonb, $4::jsonb)
