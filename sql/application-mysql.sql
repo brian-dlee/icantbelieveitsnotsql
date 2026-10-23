@@ -316,7 +316,7 @@ WHERE DATE(CONVERT_TZ(p.scheduledFor, 'SYSTEM', s.timezone)) = DATE(CONVERT_TZ(:
 SELECT COUNT(*) AS pickups
 FROM pickups p
 WHERE p.scheduledFor >= CONVERT_TZ(CONCAT(:day, 'T00:00:00'), :timezone, 'SYSTEM')
-  AND p.scheduledFor < DATE_ADD(CONVERT_TZ(CONCAT(:day, 'T00:00:00'), :timezone, 'SYSTEM'), INTERVAL 1 DAY);
+  AND p.scheduledFor < CONVERT_TZ(CONCAT(DATE_ADD(:day, INTERVAL 1 DAY), 'T00:00:00'), :timezone, 'SYSTEM');
 
 -- INTERVAL arithmetic with literal and parameter counts, DATE_ADD/DATE_SUB,
 -- TIMESTAMPDIFF, UNIX_TIMESTAMP, FROM_UNIXTIME, DATE_FORMAT, STR_TO_DATE.
