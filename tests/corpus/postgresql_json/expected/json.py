@@ -81,3 +81,31 @@ async def empty_agg(
     """Runs `empty_agg`."""
     row = await connection.fetchrow(EMPTY_AGG)
     return EmptyAggRow.model_validate(_row_dict(EmptyAggRow, row)) if row is not None else None
+
+
+# ---- concat_kinds (:many) ----
+
+
+class ConcatKindsRow(pydantic.BaseModel):
+    """One result row of `concat_kinds`."""
+
+    json_with_literal: typing.Any | None
+    text_concat: str | None
+    from_pairs: typing.Any
+
+
+CONCAT_KINDS = """
+SELECT
+    meta || '{"extra": true}' AS json_with_literal,
+    meta || owner AS text_concat,
+    jsonb_object(ARRAY['a', label]) AS from_pairs
+FROM items
+ORDER BY id
+"""
+
+
+async def concat_kinds(
+    connection: asyncpg.Connection | asyncpg.Pool,
+) -> list[ConcatKindsRow]:
+    """Runs `concat_kinds`."""
+    return [ConcatKindsRow.model_validate(_row_dict(ConcatKindsRow, row)) for row in await connection.fetch(CONCAT_KINDS)]

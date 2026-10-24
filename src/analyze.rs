@@ -1490,6 +1490,35 @@ impl<'s> Analyzer<'s> {
                     declared: Some(typed.data_type.to_string()),
                 },
             )),
+            // `ARRAY[a, b]`: an array of the elements' unified type.
+            Expr::Array(array) => {
+                let mut element: Option<Column> = None;
+                for item in &array.elem {
+                    let expected = element.clone();
+                    let column = self.walk_expr(item, expected.as_ref(), None, scope)?;
+                    element = Some(match element {
+                        Some(previous) => unify_columns(&previous, &column),
+                        None => column,
+                    });
+                }
+                let element_type = element.as_ref().and_then(|e| {
+                    e.type_info
+                        .declared
+                        .clone()
+                        .or_else(|| postgresql_type_name(e.type_info.sql_type).map(str::to_string))
+                });
+                Ok(match (element, element_type) {
+                    (Some(element), Some(name)) => Column::new(
+                        "",
+                        TypeInfo {
+                            sql_type: element.type_info.sql_type,
+                            nullable: false,
+                            declared: Some(format!("{}[]", name)),
+                        },
+                    ),
+                    _ => anonymous(SqlType::Any, false),
+                })
+            }
             Expr::Interval(interval) => {
                 // `INTERVAL ? DAY` (MySQL) takes a count for a single unit;
                 // otherwise the value is an interval string such as '1 day'.
@@ -1593,9 +1622,19 @@ impl<'s> Analyzer<'s> {
             StringConcat => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
                 let nullable = l.type_info.nullable || r.type_info.nullable;
-                // PostgreSQL's `jsonb || jsonb` merges JSON values.
+                // PostgreSQL's `jsonb || jsonb` merges JSON values. With a typed
+                // text operand it picks `text || anynonarray` instead, so the
+                // other side must be JSON or something PostgreSQL resolves to
+                // JSON: an untyped string literal, a placeholder, or unknown.
+                let resolves_to_json = |column: &Column, expr: &Expr| {
+                    column.type_info.sql_type == SqlType::Json
+                        || column.type_info.sql_type == SqlType::Any
+                        || is_placeholder(expr)
+                        || matches!(expr, Expr::Value(v) if matches!(v.value, Value::SingleQuotedString(_)))
+                };
                 let json = self.dialect == SqlDialect::PostgreSQL
-                    && (l.type_info.sql_type == SqlType::Json || r.type_info.sql_type == SqlType::Json);
+                    && ((l.type_info.sql_type == SqlType::Json && resolves_to_json(&r, right))
+                        || (r.type_info.sql_type == SqlType::Json && resolves_to_json(&l, left)));
                 Ok(anonymous(if json { SqlType::Json } else { SqlType::Text }, nullable))
             }
             Arrow | HashArrow => {
@@ -1886,9 +1925,12 @@ fn postgresql_function_result(name: &str, args: &[Column]) -> Option<Column> {
 
     let column = match name {
         // Builders always return a value, even from NULL arguments.
-        "json_build_object" | "jsonb_build_object" | "json_build_array" | "jsonb_build_array"
-        | "json_object" | "jsonb_object" => anonymous(Json, false),
-        "to_json" | "to_jsonb" | "row_to_json" | "array_to_json" | "jsonb_set" | "jsonb_insert"
+        "json_build_object" | "jsonb_build_object" | "json_build_array" | "jsonb_build_array" => {
+            anonymous(Json, false)
+        }
+        // json[b]_object take text arrays and are strict.
+        "json_object" | "jsonb_object" | "to_json" | "to_jsonb" | "row_to_json" | "array_to_json"
+        | "jsonb_set" | "jsonb_insert"
         | "jsonb_strip_nulls" | "json_strip_nulls" | "jsonb_set_lax" => anonymous(Json, any_nullable),
         // Aggregates over no rows return NULL.
         "json_agg" | "jsonb_agg" | "json_object_agg" | "jsonb_object_agg" => anonymous(Json, true),

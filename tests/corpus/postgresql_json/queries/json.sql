@@ -20,3 +20,13 @@ ORDER BY owner;
 
 -- name: empty_agg :one
 SELECT jsonb_agg(id) AS ids, array_agg(id) AS id_array FROM items WHERE id < 0;
+
+-- `||` is JSON only when both sides are (or resolve to) JSON; with a typed
+-- text operand PostgreSQL concatenates text. json_object is strict.
+-- name: concat_kinds :many
+SELECT
+    meta || '{"extra": true}' AS json_with_literal,
+    meta || owner AS text_concat,
+    jsonb_object(ARRAY['a', label]) AS from_pairs
+FROM items
+ORDER BY id;
