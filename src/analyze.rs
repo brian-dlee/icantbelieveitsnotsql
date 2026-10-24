@@ -278,6 +278,10 @@ pub struct Analyzer<'s> {
     dialect: SqlDialect,
     params: Vec<RawParam>,
     warnings: Vec<String>,
+    /// Above zero while analyzing a query whose output column names are
+    /// never used (EXISTS/IN/scalar subqueries, later set-operation arms,
+    /// CTEs and derived tables with an explicit column list).
+    unnamed_depth: usize,
 }
 
 pub fn analyze_statement(
@@ -290,6 +294,7 @@ pub fn analyze_statement(
         dialect,
         params: Vec::new(),
         warnings: Vec::new(),
+        unnamed_depth: 0,
     };
     let root = Scope::default();
 
@@ -345,11 +350,20 @@ pub fn analyze_view_columns(query: &Query, schema: &Schema, dialect: SqlDialect)
         dialect,
         params: Vec::new(),
         warnings: Vec::new(),
+        unnamed_depth: 0,
     };
     analyzer.analyze_query(query, None)
 }
 
 impl<'s> Analyzer<'s> {
+    /// Runs `analyze` with the "unaliased expression" warning silenced.
+    fn quietly<T>(&mut self, analyze: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        self.unnamed_depth += 1;
+        let result = analyze(self);
+        self.unnamed_depth -= 1;
+        result
+    }
+
     fn warn(&mut self, message: String) {
         if !self.warnings.contains(&message) {
             self.warnings.push(message);
@@ -566,12 +580,57 @@ impl<'s> Analyzer<'s> {
 
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
-                let mut columns = self.analyze_query(&cte.query, Some(&cte_scope))?;
+                let name = cte.alias.name.value.clone();
+                // `name(a, b) AS (...)` names the columns itself. An error
+                // abandons the whole analysis, so the counter needs no reset then.
+                let named_by_alias = !cte.alias.columns.is_empty();
+                if named_by_alias {
+                    self.unnamed_depth += 1;
+                }
+                let anchor = match cte.query.body.as_ref() {
+                    SetExpr::SetOperation { left, .. } if with.recursive => Some(left),
+                    _ => None,
+                };
+
+                let columns = if let Some(anchor) = anchor {
+                    // A recursive CTE refers to itself: type it from the anchor
+                    // arm, then re-analyze the whole body against that until the
+                    // recursive arm stops widening it. Only the last pass keeps
+                    // its parameters and warnings.
+                    let (params_mark, warnings_mark) = (self.params.len(), self.warnings.len());
+                    let mut columns = self.analyze_set_expr(anchor, &cte_scope, None)?;
+                    for pass in 0..2 {
+                        self.params.truncate(params_mark);
+                        self.warnings.truncate(warnings_mark);
+                        apply_alias_columns(&mut columns, &cte.alias);
+                        let mut recursive_scope = Scope {
+                            parent: Some(&cte_scope),
+                            ..Default::default()
+                        };
+                        recursive_scope.ctes.push(Table {
+                            name: name.clone(),
+                            columns: columns.clone(),
+                        });
+                        let next = self.analyze_query(&cte.query, Some(&recursive_scope))?;
+                        let settled = next.len() == columns.len()
+                            && next.iter().zip(&columns).all(|(a, b)| a.type_info == b.type_info);
+                        if pass == 1 || settled {
+                            columns = next;
+                            break;
+                        }
+                        columns = next;
+                    }
+                    columns
+                } else {
+                    self.analyze_query(&cte.query, Some(&cte_scope))?
+                };
+
+                if named_by_alias {
+                    self.unnamed_depth -= 1;
+                }
+                let mut columns = columns;
                 apply_alias_columns(&mut columns, &cte.alias);
-                cte_scope.ctes.push(Table {
-                    name: cte.alias.name.value.clone(),
-                    columns,
-                });
+                cte_scope.ctes.push(Table { name, columns });
             }
         }
 
@@ -593,7 +652,8 @@ impl<'s> Analyzer<'s> {
             }
             SetExpr::SetOperation { left, right, .. } => {
                 let left_columns = self.analyze_set_expr(left, scope, None)?;
-                let right_columns = self.analyze_set_expr(right, scope, None)?;
+                // Set operations take their column names from the first arm.
+                let right_columns = self.quietly(|a| a.analyze_set_expr(right, scope, None))?;
 
                 if left_columns.len() != right_columns.len() {
                     return Err(format!(
@@ -772,10 +832,12 @@ impl<'s> Analyzer<'s> {
             Expr::Function(function) => object_name_last(&function.name).to_lowercase(),
             _ => {
                 let name = format!("column_{}", index + 1);
-                self.warn(format!(
-                    "unaliased expression `{}` in SELECT is exposed as `{}`; add `AS <name>`",
-                    expr, name
-                ));
+                if self.unnamed_depth == 0 {
+                    self.warn(format!(
+                        "unaliased expression `{}` in SELECT is exposed as `{}`; add `AS <name>`",
+                        expr, name
+                    ));
+                }
                 name
             }
         }
@@ -906,7 +968,12 @@ impl<'s> Analyzer<'s> {
                 });
             }
             TableFactor::Derived { subquery, alias, .. } => {
-                let mut columns = self.analyze_query(subquery, Some(&*scope))?;
+                let named_by_alias = alias.as_ref().is_some_and(|a| !a.columns.is_empty());
+                let mut columns = if named_by_alias {
+                    self.quietly(|a| a.analyze_query(subquery, Some(&*scope)))?
+                } else {
+                    self.analyze_query(subquery, Some(&*scope))?
+                };
                 let name = alias
                     .as_ref()
                     .map(|a| a.name.value.clone())
@@ -1232,7 +1299,7 @@ impl<'s> Analyzer<'s> {
                 Ok(anonymous(SqlType::Bool, false))
             }
             Expr::InSubquery { expr, subquery, .. } => {
-                let columns = self.analyze_query(subquery, Some(scope))?;
+                let columns = self.quietly(|a| a.analyze_query(subquery, Some(scope)))?;
                 if columns.len() != 1 {
                     return Err(format!(
                         "IN (subquery) must select exactly one column, got {}",
@@ -1324,11 +1391,11 @@ impl<'s> Analyzer<'s> {
                 Ok(anonymous(SqlType::Bool, l.type_info.nullable || r.type_info.nullable))
             }
             Expr::Exists { subquery, .. } => {
-                self.analyze_query(subquery, Some(scope))?;
+                self.quietly(|a| a.analyze_query(subquery, Some(scope)))?;
                 Ok(anonymous(SqlType::Bool, false))
             }
             Expr::Subquery(subquery) => {
-                let columns = self.analyze_query(subquery, Some(scope))?;
+                let columns = self.quietly(|a| a.analyze_query(subquery, Some(scope)))?;
                 let mut column = columns
                     .into_iter()
                     .next()
