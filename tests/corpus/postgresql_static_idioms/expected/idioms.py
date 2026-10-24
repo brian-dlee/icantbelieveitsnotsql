@@ -117,3 +117,36 @@ async def set_lock_timeout(
     """Runs `set_lock_timeout`."""
     params = tuple(SetLockTimeoutParams(timeout=timeout).model_dump(by_alias=True).values())
     await connection.execute(SET_LOCK_TIMEOUT, *params)
+
+
+# ---- get_setting (:one) ----
+
+
+class GetSettingRow(pydantic.BaseModel):
+    """One result row of `get_setting`."""
+
+    value: str | None
+
+
+class GetSettingParams(pydantic.BaseModel):
+    """Parameters of `get_setting`."""
+
+    name: str
+    missing_ok: bool
+
+
+GET_SETTING = """
+SELECT current_setting($1, $2) AS value
+"""
+
+
+async def get_setting(
+    connection: asyncpg.Connection | asyncpg.Pool,
+    *,
+    name: str,
+    missing_ok: bool,
+) -> GetSettingRow | None:
+    """Runs `get_setting`."""
+    params = tuple(GetSettingParams(name=name, missing_ok=missing_ok).model_dump(by_alias=True).values())
+    row = await connection.fetchrow(GET_SETTING, *params)
+    return GetSettingRow.model_validate(_row_dict(GetSettingRow, row)) if row is not None else None

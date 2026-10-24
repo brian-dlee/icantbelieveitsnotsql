@@ -22,3 +22,7 @@ LIMIT :limit;
 -- SET cannot take a bound parameter; set_config can (true = transaction-local).
 -- name: set_lock_timeout :exec
 SELECT set_config('lock_timeout', :timeout, true);
+
+-- current_setting's second argument (missing_ok) is a boolean.
+-- name: get_setting :one
+SELECT current_setting(:name, :missing_ok) AS value;

@@ -191,11 +191,16 @@ static form:
 | `LIMIT {n}` / `OFFSET {n}` | `LIMIT :limit OFFSET :offset` |
 | `IN (%s, %s, ...)` from `", ".join(...)` | a list parameter: `-- param: ids list[int]` with `IN (:ids)` |
 | a sort chosen at runtime | `ORDER BY CASE WHEN :sort = 'price' THEN price END, id` |
-| keyset pagination with an optional cursor | `(:before_id IS NULL OR id < :before_id) ORDER BY id DESC LIMIT :limit` |
+| keyset pagination with an optional cursor | `(:before_id IS NULL OR id < :before_id) ORDER BY id DESC LIMIT :limit`. In PostgreSQL, cast the tested parameter: `(:before_id::bigint IS NULL OR ...)` |
 | `... FOR UPDATE` only sometimes | two named queries, e.g. `get_listing` and `get_listing_for_update` |
 | a table or column name from code | one named query per table or column. Identifiers can't be parameters |
 | `SET SESSION max_execution_time = {ms}` (MySQL) | `SET SESSION max_execution_time = :ms` with `-- param: ms int` |
 | `SET LOCAL lock_timeout = '{t}'` (PostgreSQL) | `SELECT set_config('lock_timeout', :timeout, true)`. `SET` can't take a parameter |
+
+The `set_config(..., true)` form only lasts until the end of the current
+transaction. Run it and the queries it should affect on one connection inside
+`connection.transaction()`. Given a pool, the generated function runs it on
+whichever connection it borrows, and the setting is gone before the next call.
 
 The `mysql_static_idioms` and `postgresql_static_idioms` corpus cases contain
 each of these and were checked against MySQL 5.7 and PostgreSQL 16.

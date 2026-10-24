@@ -2320,6 +2320,7 @@ fn function_arg_expectation(
             Some(typed_hint("", SqlType::DateTime))
         }
         "set_config" if index == 2 => Some(typed_hint("", SqlType::Bool)),
+        "current_setting" if index == 1 => Some(typed_hint("", SqlType::Bool)),
         "set_config" | "current_setting" if index < 2 => text(),
         "timestampdiff" if index > 0 => Some(typed_hint("", SqlType::DateTime)),
         "timestampadd" if index == 1 => int(),
