@@ -1,6 +1,7 @@
 -- Widgets
 --
 -- A bare `--` line is a comment in MySQL.
+--	A tab also starts a comment, even with the user's apostrophe.
 CREATE TABLE widgets (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(64) NOT NULL,

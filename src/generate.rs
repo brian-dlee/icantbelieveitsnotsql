@@ -80,9 +80,9 @@ fn clean_parser_error(message: &str) -> String {
 }
 
 /// Rewrites source text where sqlparser and the database disagree on lexing.
-fn normalize_contents(dialect: SqlDialect, parser_dialect: &dyn sqlparser::dialect::Dialect, contents: String) -> String {
+fn normalize_contents(dialect: SqlDialect, contents: String) -> String {
     match dialect {
-        SqlDialect::MySQL => crate::paramstyle::normalize_mysql_dash_comments(&contents, parser_dialect),
+        SqlDialect::MySQL => crate::paramstyle::normalize_mysql_dash_comments(&contents),
         _ => contents,
     }
 }
@@ -160,7 +160,7 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
             }
         };
 
-        let contents = normalize_contents(dialect, parser_dialect.as_ref(), contents);
+        let contents = normalize_contents(dialect, contents);
         match SqlParser::parse_sql(parser_dialect.as_ref(), &contents) {
             Ok(statements) => {
                 for statement in statements {
@@ -212,7 +212,7 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
             }
         };
 
-        let contents = normalize_contents(dialect, parser_dialect.as_ref(), contents);
+        let contents = normalize_contents(dialect, contents);
         let blocks = match parse_query_file(&relative_path, &contents, parser_dialect.as_ref()) {
             Ok(blocks) => blocks,
             Err(diagnostics) => {

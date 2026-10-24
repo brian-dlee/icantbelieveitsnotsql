@@ -3,7 +3,7 @@
 
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer, Whitespace};
+use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer};
 
 use crate::analyze::Param;
 
@@ -269,37 +269,66 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
 /// end of input) as a comment, but sqlparser only accepts `-- ` with a space.
 /// Returns `sql` with a space inserted after each such `--`, so a bare `--`
 /// line parses the way MySQL reads it. Line numbers are unchanged.
-pub fn normalize_mysql_dash_comments(sql: &str, dialect: &dyn Dialect) -> String {
-    let Ok(tokens) = Tokenizer::new(dialect, sql).tokenize_with_location() else {
-        return sql.to_string();
-    };
-    let mut line_starts = vec![0];
-    line_starts.extend(sql.match_indices('\n').map(|(i, _)| i + 1));
-    let offset = |location: Location| byte_offset(sql, &line_starts, location);
-
-    let mut inserts = Vec::new();
-    for (index, pair) in tokens.windows(2).enumerate() {
-        if pair[0].token != Token::Minus || pair[1].token != Token::Minus {
-            continue;
-        }
-        if offset(pair[0].span.end) != offset(pair[1].span.start) {
-            continue;
-        }
-        let ends_comment = matches!(
-            tokens.get(index + 2).map(|t| &t.token),
-            None | Some(Token::EOF) | Some(Token::Whitespace(Whitespace::Newline | Whitespace::Tab))
-        );
-        if ends_comment {
-            inserts.push(offset(pair[1].span.end));
-        }
-    }
-
-    let mut out = String::with_capacity(sql.len() + inserts.len());
+///
+/// This scans MySQL's lexical rules directly instead of tokenizing, because
+/// the comment text itself may not tokenize as SQL (`--\tuser's note`).
+pub fn normalize_mysql_dash_comments(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + 8);
     let mut cursor = 0;
-    for at in inserts {
-        out.push_str(&sql[cursor..at]);
-        out.push(' ');
-        cursor = at;
+    let mut i = 0;
+
+    let skip_to_line_end = |from: usize| bytes[from..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| from + n);
+
+    while i < bytes.len() {
+        match bytes[i] {
+            // Quoted strings and identifiers: backslash escapes and doubled quotes.
+            quote @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' && quote != b'`' {
+                        i += 2;
+                    } else if bytes[i] == quote {
+                        if bytes.get(i + 1) == Some(&quote) {
+                            i += 2;
+                        } else {
+                            i += 1;
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = sql[i + 2..].find("*/").map_or(bytes.len(), |n| i + 2 + n + 2);
+            }
+            b'#' => i = skip_to_line_end(i),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                match bytes.get(i + 2) {
+                    // Already `-- `, which sqlparser accepts.
+                    Some(b' ') => {}
+                    // Other whitespace, a control character, or the end of input.
+                    None => {
+                        out.push_str(&sql[cursor..i + 2]);
+                        out.push(' ');
+                        cursor = i + 2;
+                    }
+                    Some(&next) if next.is_ascii_whitespace() || next.is_ascii_control() => {
+                        out.push_str(&sql[cursor..i + 2]);
+                        out.push(' ');
+                        cursor = i + 2;
+                    }
+                    // `5--1` is 5 minus -1, not a comment.
+                    Some(_) => {
+                        i += 2;
+                        continue;
+                    }
+                }
+                i = skip_to_line_end(i);
+            }
+            _ => i += 1,
+        }
     }
     out.push_str(&sql[cursor..]);
     out
