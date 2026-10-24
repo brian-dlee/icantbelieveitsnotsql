@@ -1319,7 +1319,7 @@ impl<'s> Analyzer<'s> {
                 }
                 // A generated `column_N` name must not become a parameter name.
                 let mut target = columns[0].clone();
-                if is_generated_name(&target) {
+                if selects_unaliased_expression(subquery) {
                     target.name = String::new();
                 }
                 let expected = comparison_target(&target);
@@ -1989,13 +1989,23 @@ fn raw_type(raw: &RawParam) -> TypeInfo {
 
 /// A placeholder compared with a column should not be nullable by default:
 /// `col = NULL` never matches. `IS NULL` checks re-enable nullability.
-/// True for the `column_N` name given to an unaliased SELECT expression.
-fn is_generated_name(column: &Column) -> bool {
-    column.source.is_none()
-        && column
-            .name
-            .strip_prefix("column_")
-            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+/// True when a single-column query's output name is generated (`column_N`):
+/// its first select item is an unaliased expression other than a column
+/// reference or function call. Set operations take names from the first arm.
+fn selects_unaliased_expression(query: &Query) -> bool {
+    fn first_item(body: &SetExpr) -> Option<&SelectItem> {
+        match body {
+            SetExpr::Select(select) => select.projection.first(),
+            SetExpr::Query(query) => first_item(&query.body),
+            SetExpr::SetOperation { left, .. } => first_item(left),
+            _ => None,
+        }
+    }
+    matches!(
+        first_item(&query.body),
+        Some(SelectItem::UnnamedExpr(expr))
+            if !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Function(_))
+    )
 }
 
 fn comparison_target(column: &Column) -> Column {

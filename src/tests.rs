@@ -422,6 +422,9 @@ fn derived_table_names_still_warn_inside_exists() {
 fn in_subquery_generated_name_does_not_name_the_parameter() {
     let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT 1 + 2)");
     assert_eq!(param_summary(&analysis)[0].0, "param_1");
+    // An explicit alias is kept, even one that looks generated.
+    let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT 1 + 2 AS column_1)");
+    assert_eq!(param_summary(&analysis)[0].0, "column_1");
     // A real column name still names the parameter.
     let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT user_id FROM orders)");
     assert_eq!(param_summary(&analysis)[0].0, "user_id");
