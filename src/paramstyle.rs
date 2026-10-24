@@ -265,6 +265,75 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
     ))
 }
 
+/// MySQL reads `--` followed by any whitespace or control character (or the
+/// end of input) as a comment, but sqlparser only accepts `-- ` with a space.
+/// Returns `sql` with a space inserted after each such `--`, so a bare `--`
+/// line parses the way MySQL reads it. Line numbers are unchanged.
+///
+/// This scans MySQL's lexical rules directly instead of tokenizing, because
+/// the comment text itself may not tokenize as SQL (`--\tuser's note`).
+pub fn normalize_mysql_dash_comments(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + 8);
+    let mut cursor = 0;
+    let mut i = 0;
+
+    let skip_to_line_end = |from: usize| bytes[from..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| from + n);
+
+    while i < bytes.len() {
+        match bytes[i] {
+            // Quoted strings and identifiers: backslash escapes and doubled quotes.
+            quote @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' && quote != b'`' {
+                        i += 2;
+                    } else if bytes[i] == quote {
+                        if bytes.get(i + 1) == Some(&quote) {
+                            i += 2;
+                        } else {
+                            i += 1;
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = sql[i + 2..].find("*/").map_or(bytes.len(), |n| i + 2 + n + 2);
+            }
+            b'#' => i = skip_to_line_end(i),
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                match bytes.get(i + 2) {
+                    // Already `-- `, which sqlparser accepts.
+                    Some(b' ') => {}
+                    // Other whitespace, a control character, or the end of input.
+                    None => {
+                        out.push_str(&sql[cursor..i + 2]);
+                        out.push(' ');
+                        cursor = i + 2;
+                    }
+                    Some(&next) if next.is_ascii_whitespace() || next.is_ascii_control() => {
+                        out.push_str(&sql[cursor..i + 2]);
+                        out.push(' ');
+                        cursor = i + 2;
+                    }
+                    // `5--1` is 5 minus -1, not a comment.
+                    Some(_) => {
+                        i += 2;
+                        continue;
+                    }
+                }
+                i = skip_to_line_end(i);
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&sql[cursor..]);
+    out
+}
+
 fn push_literal(out: &mut String, text: &str, style: ParamStyle, bound: bool) {
     if style == ParamStyle::Pyformat && bound {
         out.push_str(&text.replace('%', "%%"));
