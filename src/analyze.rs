@@ -8,7 +8,7 @@ use sqlparser::ast::{
     FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert, JoinConstraint,
     JoinOperator, LimitClause, OnConflictAction, OnInsert, OrderByKind, Query,
     Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, Subscript, TableAlias,
-    TableFactor, TableObject, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value,
+    Set, TableFactor, TableObject, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value,
 };
 
 use crate::dialect::SqlDialect;
@@ -328,6 +328,20 @@ pub fn analyze_statement(
             )?,
         ),
         Statement::Delete(delete) => (StatementKind::Delete, analyzer.analyze_delete(delete, &root)?),
+        // `SET x = :value`: walk the values so their placeholders are bound.
+        Statement::Set(set) => {
+            let values: Vec<&Expr> = match set {
+                Set::SingleAssignment { values, .. } | Set::ParenthesizedAssignments { values, .. } => {
+                    values.iter().collect()
+                }
+                Set::MultipleAssignments { assignments } => assignments.iter().map(|a| &a.value).collect(),
+                _ => Vec::new(),
+            };
+            for value in values {
+                analyzer.walk_expr(value, None, None, &root)?;
+            }
+            (StatementKind::Other, Vec::new())
+        }
         Statement::CreateTable(_)
         | Statement::CreateIndex(_)
         | Statement::CreateView { .. }
@@ -2025,6 +2039,10 @@ fn postgresql_function_result(name: &str, args: &[Column], has_named_args: bool)
         ),
         // Aggregates over no rows return NULL.
         "json_agg" | "jsonb_agg" | "json_object_agg" | "jsonb_object_agg" => anonymous(Json, true),
+        // set_config returns the new value; current_setting(name, missing_ok)
+        // is NULL for a missing setting.
+        "set_config" => anonymous(Text, any_nullable),
+        "current_setting" => anonymous(Text, args.len() > 1 || any_nullable),
         "array_agg" => {
             let element = args.first()?;
             let element_type = element
@@ -2301,6 +2319,8 @@ fn function_arg_expectation(
         {
             Some(typed_hint("", SqlType::DateTime))
         }
+        "set_config" if index == 2 => Some(typed_hint("", SqlType::Bool)),
+        "set_config" | "current_setting" if index < 2 => text(),
         "timestampdiff" if index > 0 => Some(typed_hint("", SqlType::DateTime)),
         "timestampadd" if index == 1 => int(),
         "timestampadd" if index == 2 => Some(typed_hint("", SqlType::DateTime)),

@@ -8,8 +8,9 @@
 -- Placeholder note: the service writes `%(name)s` (pyformat). Here they are
 -- written as butter's `:name`, and `%s` as `?`.
 --
--- Patterns the service builds dynamically in Python have no static equivalent
--- yet and are listed at the end of the file as open design questions.
+-- Patterns the service builds dynamically in Python are listed at the end of
+-- the file; the README's "Queries that would otherwise be built at runtime"
+-- gives the static form butter supports for each.
 
 -- ------------------------------------------------------------------ schema
 
@@ -470,10 +471,11 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 -- name: set_statement_timeout :exec
 SET SESSION max_execution_time = 600000;
 
--- ---------------------------------------------------- dynamic SQL (open)
+-- ------------------------------------------------------------ dynamic SQL
 --
--- These are built in Python today; each needs a static design in butter
--- (or an explicit "not supported" answer):
+-- These are built in Python today. See the README section "Queries that would
+-- otherwise be built at runtime" for the static form of each; the
+-- mysql_static_idioms corpus case exercises them.
 --
 -- 1. Optional WHERE fragments appended only when a filter is set
 --    (`where += " AND col >= %(x)s"`), and lists of conditions joined with

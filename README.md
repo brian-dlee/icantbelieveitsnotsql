@@ -179,6 +179,27 @@ SELECT id, name FROM widgets WHERE id IN (:ids);
   sole item of an `IN (...)`. List parameters need named placeholders, and
   `:execmany` can't take them.
 
+### Queries that would otherwise be built at runtime
+
+butter generates code for fixed SQL, so assembling a query from strings at
+runtime has no direct equivalent. Each common reason for doing that has a
+static form:
+
+| Instead of building... | Write |
+| --- | --- |
+| optional conditions (`where += " AND price >= %s"`) | `(:min_price IS NULL OR price >= :min_price)`, and pass `None` to skip it. PostgreSQL needs a cast on the tested parameter: `(:min_price::float8 IS NULL OR ...)` |
+| `LIMIT {n}` / `OFFSET {n}` | `LIMIT :limit OFFSET :offset` |
+| `IN (%s, %s, ...)` from `", ".join(...)` | a list parameter: `-- param: ids list[int]` with `IN (:ids)` |
+| a sort chosen at runtime | `ORDER BY CASE WHEN :sort = 'price' THEN price END, id` |
+| keyset pagination with an optional cursor | `(:before_id IS NULL OR id < :before_id) ORDER BY id DESC LIMIT :limit` |
+| `... FOR UPDATE` only sometimes | two named queries, e.g. `get_listing` and `get_listing_for_update` |
+| a table or column name from code | one named query per table or column. Identifiers can't be parameters |
+| `SET SESSION max_execution_time = {ms}` (MySQL) | `SET SESSION max_execution_time = :ms` with `-- param: ms int` |
+| `SET LOCAL lock_timeout = '{t}'` (PostgreSQL) | `SELECT set_config('lock_timeout', :timeout, true)`. `SET` can't take a parameter |
+
+The `mysql_static_idioms` and `postgresql_static_idioms` corpus cases contain
+each of these and were checked against MySQL 5.7 and PostgreSQL 16.
+
 ### Result columns
 
 `SELECT *` and `alias.*` expand from the schema. Expression columns are typed
@@ -300,8 +321,8 @@ without a custom codec. If you register a codec, override the type with
 
 - Type inference started with SQLite. PostgreSQL and MySQL functions are being
   added, and unknown ones fall back to `typing.Any` with a warning.
-- No dynamic SQL: write one named query per variant (`..._by_status`,
-  `..._ignore_conflicts`) or use `(:p IS NULL OR col = :p)`.
+- No dynamic SQL. See "Queries that would otherwise be built at runtime" for
+  the static form of each common pattern.
 - Numbered `?NNN` placeholders are rejected.
 - `SELECT *` depends on the declared column order matching the live database.
 
