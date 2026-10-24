@@ -284,6 +284,9 @@ pub struct Analyzer<'s> {
     /// never used (EXISTS/IN/scalar subqueries, later set-operation arms,
     /// CTEs and derived tables with an explicit column list).
     unnamed_depth: usize,
+    /// MySQL user variables (`@name`, lowercased) and the type last assigned
+    /// to each in this statement.
+    user_variables: std::collections::HashMap<String, Column>,
 }
 
 pub fn analyze_statement(
@@ -297,6 +300,7 @@ pub fn analyze_statement(
         params: Vec::new(),
         warnings: Vec::new(),
         unnamed_depth: 0,
+        user_variables: std::collections::HashMap::new(),
     };
     let root = Scope::default();
 
@@ -353,6 +357,7 @@ pub fn analyze_view_columns(query: &Query, schema: &Schema, dialect: SqlDialect)
         params: Vec::new(),
         warnings: Vec::new(),
         unnamed_depth: 0,
+        user_variables: std::collections::HashMap::new(),
     };
     analyzer.analyze_query(query, None)
 }
@@ -374,6 +379,25 @@ impl<'s> Analyzer<'s> {
         let result = analyze(self);
         self.unnamed_depth -= 1;
         result
+    }
+
+    /// `@name` (user) and `@@name` (system) variables are MySQL values, not columns.
+    fn is_mysql_variable(&self, name: &str) -> bool {
+        self.dialect == SqlDialect::MySQL && name.starts_with('@')
+    }
+
+    /// The type of a variable read: its last assignment in this statement,
+    /// nullable because an unset variable is NULL.
+    fn mysql_variable(&self, name: &str) -> Column {
+        match self.user_variables.get(&name.to_lowercase()) {
+            Some(column) => {
+                let mut column = column.clone();
+                column.name = String::new();
+                column.type_info.nullable = true;
+                column
+            }
+            None => anonymous(SqlType::Any, true),
+        }
     }
 
     fn warn(&mut self, message: String) {
@@ -843,6 +867,15 @@ impl<'s> Analyzer<'s> {
             Expr::Identifier(ident) => ident.value.clone(),
             Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()).unwrap_or_default(),
             Expr::Function(function) => object_name_last(&function.name).to_lowercase(),
+            // `@rn := expr` is named after its variable.
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Assignment,
+                ..
+            } if matches!(left.as_ref(), Expr::Identifier(ident) if self.is_mysql_variable(&ident.value)) => {
+                let Expr::Identifier(ident) = left.as_ref() else { unreachable!() };
+                ident.value.trim_start_matches('@').to_string()
+            }
             _ => {
                 let name = format!("column_{}", index + 1);
                 if self.unnamed_depth == 0 {
@@ -859,6 +892,10 @@ impl<'s> Analyzer<'s> {
     /// Like `walk_expr`, but a bare column reference must resolve.
     fn walk_projection_expr(&mut self, expr: &Expr, scope: &Scope) -> Result<Column, String> {
         match expr {
+            Expr::Identifier(ident) if self.is_mysql_variable(&ident.value) => Ok(self.mysql_variable(&ident.value)),
+            Expr::CompoundIdentifier(idents) if idents.first().is_some_and(|i| self.is_mysql_variable(&i.value)) => {
+                Ok(anonymous(SqlType::Any, true))
+            }
             Expr::Identifier(ident) => self.column_strict(scope, None, &ident.value),
             Expr::CompoundIdentifier(idents) => {
                 let (qualifier, name) = split_qualified(idents);
@@ -1251,6 +1288,11 @@ impl<'s> Analyzer<'s> {
                 Value::Null => Ok(anonymous(SqlType::Any, true)),
                 _ => Ok(anonymous(SqlType::Any, true)),
             },
+            Expr::Identifier(ident) if self.is_mysql_variable(&ident.value) => Ok(self.mysql_variable(&ident.value)),
+            // `@@session.sql_mode` and friends.
+            Expr::CompoundIdentifier(idents) if idents.first().is_some_and(|i| self.is_mysql_variable(&i.value)) => {
+                Ok(anonymous(SqlType::Any, true))
+            }
             Expr::Identifier(ident) => {
                 Ok(self.column_lenient(scope, None, &ident.value, ident.quote_style == Some('"')))
             }
@@ -1611,6 +1653,23 @@ impl<'s> Analyzer<'s> {
         use BinaryOperator::*;
 
         match op {
+            // MySQL `@name := expr` assigns and returns expr.
+            Assignment => match left {
+                Expr::Identifier(ident) if self.is_mysql_variable(&ident.value) => {
+                    let value = self.walk_expr(right, None, None, scope)?;
+                    let mut stored = value.clone();
+                    stored.name = String::new();
+                    self.user_variables.insert(ident.value.to_lowercase(), stored);
+                    Ok(Column {
+                        name: String::new(),
+                        ..value
+                    })
+                }
+                _ => {
+                    let (_, r) = self.walk_pair(left, right, scope, false)?;
+                    Ok(anonymous(r.type_info.sql_type, r.type_info.nullable))
+                }
+            },
             And | Or | Xor => {
                 self.walk_expr(left, None, None, scope)?;
                 self.walk_expr(right, None, None, scope)?;

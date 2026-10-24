@@ -1,0 +1,6 @@
+CREATE TABLE offers (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    listingId INT NOT NULL,
+    amount FLOAT NOT NULL,
+    createdAt DATETIME(3) NOT NULL
+);
