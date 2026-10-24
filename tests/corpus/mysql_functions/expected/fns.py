@@ -32,7 +32,11 @@ class ProbeRow(pydantic.BaseModel):
     parsed_ts: datetime.datetime | None
     epoch0: int
     epoch3: float
-    epoch_ts: datetime.datetime
+    epoch_day: int
+    epoch_param: float
+    before_epoch: datetime.datetime | None
+    later_by: datetime.datetime
+    epoch_ts: datetime.datetime | None
     minutes: int
     shifted: datetime.datetime | None
     named_shift: datetime.datetime | None
@@ -54,6 +58,8 @@ class ProbeParams(pydantic.BaseModel):
     """Parameters of `probe`."""
 
     start: datetime.datetime
+    moment: datetime.datetime
+    minutes: int
     cutoff: datetime.date
     id: int
 
@@ -72,6 +78,10 @@ SELECT
     STR_TO_DATE('2024-01-02 03:04', '%%Y-%%m-%%d %%H:%%i') AS parsed_ts,
     UNIX_TIMESTAMP(e.at0) AS epoch0,
     UNIX_TIMESTAMP(e.at3) AS epoch3,
+    UNIX_TIMESTAMP(e.day) AS epoch_day,
+    UNIX_TIMESTAMP(%(moment)s) AS epoch_param,
+    FROM_UNIXTIME(-1) AS before_epoch,
+    TIMESTAMPADD(MINUTE, %(minutes)s, e.at0) AS later_by,
     FROM_UNIXTIME(0) AS epoch_ts,
     TIMESTAMPDIFF(MINUTE, e.at0, e.at3) AS minutes,
     CONVERT_TZ(e.at0, '+00:00', '+02:00') AS shifted,
@@ -97,11 +107,13 @@ def probe(
     cursor: pymysql.cursors.Cursor,
     *,
     start: datetime.datetime,
+    moment: datetime.datetime,
+    minutes: int,
     cutoff: datetime.date,
     id: int,
 ) -> ProbeRow | None:
     """Runs `probe`."""
-    params = ProbeParams(start=start, cutoff=cutoff, id=id).model_dump(by_alias=True)
+    params = ProbeParams(start=start, moment=moment, minutes=minutes, cutoff=cutoff, id=id).model_dump(by_alias=True)
     cursor.execute(PROBE, params)
     row = cursor.fetchone()
     return ProbeRow.model_validate(_row_dict(ProbeRow, row)) if row is not None else None

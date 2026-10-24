@@ -1787,6 +1787,23 @@ impl<'s> Analyzer<'s> {
     }
 }
 
+/// Fractional-second precision of a declared `DATETIME(n)`, `TIMESTAMP(n)` or
+/// `TIME(n)` column (0 when declared without one); `None` for anything else.
+fn temporal_precision(column: &Column) -> Option<u32> {
+    let declared = column.type_info.declared.as_deref()?.trim().to_uppercase();
+    let (base, rest) = match declared.split_once('(') {
+        Some((base, rest)) => (base.trim().to_string(), Some(rest)),
+        None => (declared.clone(), None),
+    };
+    if !matches!(base.as_str(), "DATETIME" | "TIMESTAMP" | "TIME" | "DATE") {
+        return None;
+    }
+    match rest {
+        None => Some(0),
+        Some(rest) => rest.trim_end_matches(')').trim().parse().ok(),
+    }
+}
+
 /// MySQL functions whose result type differs from the shared table (SQLite
 /// semantics) or depends on the raw arguments. `None` falls back to it.
 fn mysql_function_result(name: &str, exprs: &[&Expr], args: &[Column]) -> Option<Column> {
@@ -1837,15 +1854,20 @@ fn mysql_function_result(name: &str, exprs: &[&Expr], args: &[Column]) -> Option
             anonymous(if has_time { DateTime } else { Date }, true)
         }
         "unix_timestamp" => {
-            // Fractional-second inputs (DATETIME(3)) return a DECIMAL.
-            let fractional = args.first().and_then(|a| a.type_info.declared.as_deref()).is_some_and(|d| {
-                d.split_once('(')
-                    .and_then(|(_, rest)| rest.trim_end_matches(')').trim().parse::<u32>().ok())
-                    .is_some_and(|precision| precision > 0)
-            });
-            anonymous(if fractional { Numeric } else { Int }, any_nullable)
+            // An integer for whole-second temporal columns, a DECIMAL when the
+            // argument carries fractional seconds. When that depends on the
+            // value (parameters, strings), use a numeric type that takes both.
+            let sql_type = match args.first() {
+                None => Int,
+                Some(arg) => match temporal_precision(arg) {
+                    Some(0) => Int,
+                    _ => Numeric,
+                },
+            };
+            anonymous(sql_type, any_nullable)
         }
-        "from_unixtime" => anonymous(if args.len() > 1 { Text } else { DateTime }, any_nullable),
+        // Out-of-range timestamps (e.g. negative ones) give NULL.
+        "from_unixtime" => anonymous(if args.len() > 1 { Text } else { DateTime }, true),
         // NULL when a time zone is unknown (or the zone tables are not loaded).
         "convert_tz" => anonymous(DateTime, true),
         "timestampdiff" | "datediff" | "to_days" | "dayofweek" | "dayofmonth" | "dayofyear" | "weekday"
@@ -1982,6 +2004,7 @@ fn function_arg_expectation(
         {
             Some(typed_hint("", SqlType::DateTime))
         }
+        "timestampadd" if index == 1 => int(),
         "timestampdiff" | "timestampadd" if index > 0 => Some(typed_hint("", SqlType::DateTime)),
         "date_format" | "str_to_date" => text(),
         "from_unixtime" if index == 0 => int(),
