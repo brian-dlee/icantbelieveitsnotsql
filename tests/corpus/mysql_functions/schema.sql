@@ -1,0 +1,9 @@
+CREATE TABLE events (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tz VARCHAR(64) NOT NULL,
+    at0 DATETIME(0) NOT NULL,
+    at3 DATETIME(3) NOT NULL,
+    day DATE NOT NULL,
+    slot TIME NOT NULL,
+    payload JSON
+);

@@ -1545,6 +1545,7 @@ impl<'s> Analyzer<'s> {
     ) -> Result<Column, String> {
         let name = object_name_last(&function.name).to_lowercase();
         let mut arg_types: Vec<Column> = Vec::new();
+        let mut arg_exprs: Vec<&Expr> = Vec::new();
         let mut has_wildcard = false;
 
         match &function.args {
@@ -1570,13 +1571,24 @@ impl<'s> Analyzer<'s> {
                         }
                     };
 
+                    // MySQL's TIMESTAMPDIFF(MINUTE, a, b) takes a bare unit keyword.
+                    if index == 0
+                        && matches!(name.as_str(), "timestampdiff" | "timestampadd")
+                        && matches!(arg_expr, Expr::Identifier(_))
+                    {
+                        arg_exprs.push(arg_expr);
+                        arg_types.push(anonymous(SqlType::Text, false));
+                        continue;
+                    }
+
                     let arg_expected = function_arg_expectation(&name, index, &arg_types, expected);
-                    let arg_hint = if matches!(name.as_str(), "coalesce" | "ifnull" | "nullif" | "iif" | "max" | "min") {
+                    let arg_hint = if matches!(name.as_str(), "coalesce" | "ifnull" | "nullif" | "iif" | "max" | "min" | "greatest" | "least") {
                         hint
                     } else {
                         None
                     };
                     let arg_type = self.walk_expr(arg_expr, arg_expected.as_ref(), arg_hint, scope)?;
+                    arg_exprs.push(arg_expr);
                     arg_types.push(arg_type);
                 }
             }
@@ -1586,6 +1598,11 @@ impl<'s> Analyzer<'s> {
             self.walk_expr(filter, None, None, scope)?;
         }
 
+        if self.dialect == SqlDialect::MySQL {
+            if let Some(column) = mysql_function_result(&name, &arg_exprs, &arg_types) {
+                return Ok(column);
+            }
+        }
         Ok(self.function_result(&name, &arg_types, has_wildcard))
     }
 
@@ -1713,6 +1730,23 @@ impl<'s> Analyzer<'s> {
                 result
             }
             "percent_rank" | "cume_dist" => anonymous(SqlType::Float, false),
+            "greatest" | "least" => {
+                let mut result = args
+                    .iter()
+                    .skip(1)
+                    .fold(
+                        first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true)),
+                        |acc, a| unify_columns(&acc, a),
+                    );
+                result.name = String::new();
+                // MySQL returns NULL if any argument is NULL; PostgreSQL ignores NULLs.
+                result.type_info.nullable = if self.dialect == SqlDialect::MySQL {
+                    any_nullable
+                } else {
+                    all_nullable
+                };
+                result
+            }
             "now" | "transaction_timestamp" | "statement_timestamp" | "clock_timestamp" => {
                 anonymous(SqlType::DateTime, false)
             }
@@ -1751,6 +1785,89 @@ impl<'s> Analyzer<'s> {
             }
         }
     }
+}
+
+/// MySQL functions whose result type differs from the shared table (SQLite
+/// semantics) or depends on the raw arguments. `None` falls back to it.
+fn mysql_function_result(name: &str, exprs: &[&Expr], args: &[Column]) -> Option<Column> {
+    use SqlType::*;
+    let any_nullable = args.iter().any(|a| a.type_info.nullable);
+    let first_type = args.first().map(|a| a.type_info.sql_type);
+
+    let column = match name {
+        "date" => anonymous(Date, any_nullable),
+        "time" => anonymous(Time, any_nullable),
+        "timestamp" | "timestampadd" => anonymous(DateTime, any_nullable),
+        "date_add" | "date_sub" | "adddate" | "subdate" => {
+            // DATE_ADD(date, INTERVAL n DAY) stays a DATE; any time unit (or a
+            // compound unit such as DAY_HOUR) makes it a DATETIME. String
+            // inputs produce strings.
+            let time_unit = matches!(
+                exprs.get(1),
+                Some(Expr::Interval(interval))
+                    if interval.last_field.is_some()
+                        || !matches!(
+                            interval.leading_field,
+                            Some(DateTimeField::Year | DateTimeField::Quarter | DateTimeField::Month
+                                | DateTimeField::Week(_) | DateTimeField::Day)
+                        )
+            );
+            let sql_type = match first_type {
+                Some(Date) if !time_unit => Date,
+                Some(Text) => Text,
+                _ => DateTime,
+            };
+            anonymous(sql_type, any_nullable)
+        }
+        "str_to_date" => {
+            // The format decides: any time specifier gives a DATETIME.
+            let format = match exprs.get(1) {
+                Some(Expr::Value(v)) => match &v.value {
+                    Value::SingleQuotedString(format) | Value::DoubleQuotedString(format) => Some(format.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let has_time = format.map_or(true, |f| {
+                ["%H", "%h", "%I", "%i", "%k", "%l", "%p", "%r", "%S", "%s", "%T", "%f"]
+                    .iter()
+                    .any(|spec| f.contains(spec))
+            });
+            // Invalid input yields NULL.
+            anonymous(if has_time { DateTime } else { Date }, true)
+        }
+        "unix_timestamp" => {
+            // Fractional-second inputs (DATETIME(3)) return a DECIMAL.
+            let fractional = args.first().and_then(|a| a.type_info.declared.as_deref()).is_some_and(|d| {
+                d.split_once('(')
+                    .and_then(|(_, rest)| rest.trim_end_matches(')').trim().parse::<u32>().ok())
+                    .is_some_and(|precision| precision > 0)
+            });
+            anonymous(if fractional { Numeric } else { Int }, any_nullable)
+        }
+        "from_unixtime" => anonymous(if args.len() > 1 { Text } else { DateTime }, any_nullable),
+        // NULL when a time zone is unknown (or the zone tables are not loaded).
+        "convert_tz" => anonymous(DateTime, true),
+        "timestampdiff" | "datediff" | "to_days" | "dayofweek" | "dayofmonth" | "dayofyear" | "weekday"
+        | "week" | "weekofyear" | "yearweek" | "year" | "month" | "day" | "hour" | "minute" | "second"
+        | "quarter" | "microsecond" => anonymous(Int, any_nullable),
+        "dayname" | "monthname" | "date_format" | "time_format" => anonymous(Text, any_nullable),
+        "curdate" | "utc_date" => anonymous(Date, false),
+        "curtime" | "utc_time" => anonymous(Time, false),
+        "sysdate" | "utc_timestamp" => anonymous(DateTime, false),
+        "rand" => anonymous(Float, false),
+        "left" | "right" | "lpad" | "rpad" | "repeat" | "reverse" | "space" | "upper" | "lower" | "ucase"
+        | "lcase" | "substring_index" | "md5" | "sha1" | "sha2" | "uuid" => anonymous(Text, any_nullable),
+        "json_unquote" => anonymous(Text, true),
+        "json_extract" | "json_arrayagg" | "json_objectagg" => anonymous(Json, true),
+        "json_array" | "json_object" => anonymous(Json, false),
+        "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch"
+        | "json_merge_preserve" => anonymous(Json, any_nullable),
+        "json_contains" | "json_length" | "json_depth" => anonymous(Int, true),
+        "found_rows" | "row_count" | "last_insert_id" | "connection_id" => anonymous(Int, false),
+        _ => return None,
+    };
+    Some(column)
 }
 
 fn raw_type(raw: &RawParam) -> TypeInfo {
@@ -1852,6 +1969,22 @@ fn function_arg_expectation(
         | "json" | "json_extract" | "json_valid" | "json_type" | "json_array_length" => text(),
         "array_length" | "array_lower" | "array_upper" if index == 1 => int(),
         "array_position" if index == 2 => int(),
+        "convert_tz" => {
+            if index == 0 {
+                Some(typed_hint("", SqlType::DateTime))
+            } else {
+                text()
+            }
+        }
+        "date_add" | "date_sub" | "adddate" | "subdate" | "date_format" | "unix_timestamp" | "dayname"
+        | "dayofweek" | "timestamp"
+            if index == 0 =>
+        {
+            Some(typed_hint("", SqlType::DateTime))
+        }
+        "timestampdiff" | "timestampadd" if index > 0 => Some(typed_hint("", SqlType::DateTime)),
+        "date_format" | "str_to_date" => text(),
+        "from_unixtime" if index == 0 => int(),
         "date_trunc" | "date_part" if index == 0 => text(),
         "to_char" | "to_date" | "to_timestamp" if index == 1 => text(),
         "to_date" => text(),
@@ -1875,7 +2008,7 @@ fn function_arg_expectation(
         | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "degrees" | "radians" | "trunc"
         | "ceil" | "ceiling" | "floor" | "mod" | "sign" => float(),
         "randomblob" | "zeroblob" | "ntile" => int(),
-        "coalesce" | "ifnull" | "nullif" | "max" | "min" => {
+        "coalesce" | "ifnull" | "nullif" | "max" | "min" | "greatest" | "least" => {
             previous
                 .iter()
                 .find(|c| c.type_info.sql_type != SqlType::Any)
