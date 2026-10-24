@@ -1592,7 +1592,11 @@ impl<'s> Analyzer<'s> {
             }
             StringConcat => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
-                Ok(anonymous(SqlType::Text, l.type_info.nullable || r.type_info.nullable))
+                let nullable = l.type_info.nullable || r.type_info.nullable;
+                // PostgreSQL's `jsonb || jsonb` merges JSON values.
+                let json = self.dialect == SqlDialect::PostgreSQL
+                    && (l.type_info.sql_type == SqlType::Json || r.type_info.sql_type == SqlType::Json);
+                Ok(anonymous(if json { SqlType::Json } else { SqlType::Text }, nullable))
             }
             Arrow | HashArrow => {
                 self.walk_expr(left, None, None, scope)?;
@@ -1682,10 +1686,13 @@ impl<'s> Analyzer<'s> {
             self.walk_expr(filter, None, None, scope)?;
         }
 
-        if self.dialect == SqlDialect::MySQL {
-            if let Some(column) = mysql_function_result(&name, &arg_exprs, &arg_types) {
-                return Ok(column);
-            }
+        let dialect_result = match self.dialect {
+            SqlDialect::MySQL => mysql_function_result(&name, &arg_exprs, &arg_types),
+            SqlDialect::PostgreSQL => postgresql_function_result(&name, &arg_types),
+            _ => None,
+        };
+        if let Some(column) = dialect_result {
+            return Ok(column);
         }
         Ok(self.function_result(&name, &arg_types, has_wildcard))
     }
@@ -1869,6 +1876,60 @@ impl<'s> Analyzer<'s> {
             }
         }
     }
+}
+
+/// PostgreSQL functions whose result type the shared table does not know.
+/// `None` falls back to it.
+fn postgresql_function_result(name: &str, args: &[Column]) -> Option<Column> {
+    use SqlType::*;
+    let any_nullable = args.iter().any(|a| a.type_info.nullable);
+
+    let column = match name {
+        // Builders always return a value, even from NULL arguments.
+        "json_build_object" | "jsonb_build_object" | "json_build_array" | "jsonb_build_array"
+        | "json_object" | "jsonb_object" => anonymous(Json, false),
+        "to_json" | "to_jsonb" | "row_to_json" | "array_to_json" | "jsonb_set" | "jsonb_insert"
+        | "jsonb_strip_nulls" | "json_strip_nulls" | "jsonb_set_lax" => anonymous(Json, any_nullable),
+        // Aggregates over no rows return NULL.
+        "json_agg" | "jsonb_agg" | "json_object_agg" | "jsonb_object_agg" => anonymous(Json, true),
+        "array_agg" => {
+            let element = args.first()?;
+            let element_type = element
+                .type_info
+                .declared
+                .clone()
+                .or_else(|| postgresql_type_name(element.type_info.sql_type).map(str::to_string))?;
+            Column::new(
+                "",
+                TypeInfo {
+                    sql_type: element.type_info.sql_type,
+                    nullable: true,
+                    declared: Some(format!("{}[]", element_type)),
+                },
+            )
+        }
+        _ => return None,
+    };
+    Some(column)
+}
+
+/// A PostgreSQL type name for a value with no declared type (array_agg of an expression).
+fn postgresql_type_name(sql_type: SqlType) -> Option<&'static str> {
+    use SqlType::*;
+    Some(match sql_type {
+        Int => "BIGINT",
+        Float => "DOUBLE PRECISION",
+        Numeric => "NUMERIC",
+        Text => "TEXT",
+        Blob => "BYTEA",
+        Bool => "BOOLEAN",
+        Date => "DATE",
+        Time => "TIME",
+        DateTime => "TIMESTAMPTZ",
+        Interval => "INTERVAL",
+        Json => "JSONB",
+        Any => return None,
+    })
 }
 
 /// Fractional-second precision of a declared `DATETIME(n)`, `TIMESTAMP(n)` or
