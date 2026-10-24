@@ -453,6 +453,22 @@ fn locking_clause_moves_after_limit_for_parsing() {
 }
 
 #[test]
+fn mysql_bare_dash_comments_become_comments() {
+    use crate::paramstyle::normalize_mysql_dash_comments;
+    let mysql = sqlparser::dialect::MySqlDialect {};
+
+    // `--` then a newline, a tab, or the end of input is a comment in MySQL.
+    assert_eq!(
+        normalize_mysql_dash_comments("--\nSELECT 1 --\t\n--", &mysql),
+        "-- \nSELECT 1 -- \t\n-- "
+    );
+    // `-- x` already parses, and `--` inside a string literal or before a
+    // digit (`5--1` is 5 minus -1) is left alone.
+    let untouched = "-- note\nSELECT 5--1, 'a--\nb'";
+    assert_eq!(normalize_mysql_dash_comments(untouched, &mysql), untouched);
+}
+
+#[test]
 fn sqlite_current_time_keywords_are_text() {
     let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(

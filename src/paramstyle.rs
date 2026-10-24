@@ -3,7 +3,7 @@
 
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer};
+use sqlparser::tokenizer::{Location, Token, TokenWithSpan, Tokenizer, Whitespace};
 
 use crate::analyze::Param;
 
@@ -263,6 +263,46 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
         sql[lock..limit].trim_end(),
         &sql[end..]
     ))
+}
+
+/// MySQL reads `--` followed by any whitespace or control character (or the
+/// end of input) as a comment, but sqlparser only accepts `-- ` with a space.
+/// Returns `sql` with a space inserted after each such `--`, so a bare `--`
+/// line parses the way MySQL reads it. Line numbers are unchanged.
+pub fn normalize_mysql_dash_comments(sql: &str, dialect: &dyn Dialect) -> String {
+    let Ok(tokens) = Tokenizer::new(dialect, sql).tokenize_with_location() else {
+        return sql.to_string();
+    };
+    let mut line_starts = vec![0];
+    line_starts.extend(sql.match_indices('\n').map(|(i, _)| i + 1));
+    let offset = |location: Location| byte_offset(sql, &line_starts, location);
+
+    let mut inserts = Vec::new();
+    for (index, pair) in tokens.windows(2).enumerate() {
+        if pair[0].token != Token::Minus || pair[1].token != Token::Minus {
+            continue;
+        }
+        if offset(pair[0].span.end) != offset(pair[1].span.start) {
+            continue;
+        }
+        let ends_comment = matches!(
+            tokens.get(index + 2).map(|t| &t.token),
+            None | Some(Token::EOF) | Some(Token::Whitespace(Whitespace::Newline | Whitespace::Tab))
+        );
+        if ends_comment {
+            inserts.push(offset(pair[1].span.end));
+        }
+    }
+
+    let mut out = String::with_capacity(sql.len() + inserts.len());
+    let mut cursor = 0;
+    for at in inserts {
+        out.push_str(&sql[cursor..at]);
+        out.push(' ');
+        cursor = at;
+    }
+    out.push_str(&sql[cursor..]);
+    out
 }
 
 fn push_literal(out: &mut String, text: &str, style: ParamStyle, bound: bool) {
