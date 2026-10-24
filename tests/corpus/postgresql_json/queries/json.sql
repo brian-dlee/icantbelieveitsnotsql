@@ -37,6 +37,8 @@ ORDER BY id;
 -- name: array_and_lax :many
 SELECT
     ARRAY[$1, id] AS pair,
-    jsonb_set_lax('{}'::jsonb, '{k}', meta) AS lax
+    ARRAY[($2), id] AS parenthesized_pair,
+    jsonb_set_lax('{}'::jsonb, '{k}', meta) AS lax,
+    jsonb_set_lax(replacement => '{}'::jsonb, path => '{k}', jsonb_in => meta) AS named_lax
 FROM items
 ORDER BY id;

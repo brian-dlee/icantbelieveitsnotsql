@@ -184,11 +184,13 @@ fn apply_alias_columns(columns: &mut [Column], alias: &TableAlias) {
     }
 }
 
+/// A placeholder, possibly wrapped in parentheses (`($1)`).
 fn is_placeholder(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Value(v) if matches!(v.value, Value::Placeholder(_))
-    )
+    match expr {
+        Expr::Nested(inner) => is_placeholder(inner),
+        Expr::Value(v) => matches!(v.value, Value::Placeholder(_)),
+        _ => false,
+    }
 }
 
 fn numbered_dollar_placeholder(token: &str) -> Option<usize> {
@@ -1687,6 +1689,12 @@ impl<'s> Analyzer<'s> {
         let mut arg_types: Vec<Column> = Vec::new();
         let mut arg_exprs: Vec<&Expr> = Vec::new();
         let mut has_wildcard = false;
+        // `f(name => value)` may reorder arguments, so position-based rules can't apply.
+        let has_named_args = matches!(
+            &function.args,
+            FunctionArguments::List(list)
+                if list.args.iter().any(|a| !matches!(a, FunctionArg::Unnamed(_)))
+        );
 
         match &function.args {
             FunctionArguments::None => {}
@@ -1740,7 +1748,7 @@ impl<'s> Analyzer<'s> {
 
         let dialect_result = match self.dialect {
             SqlDialect::MySQL => mysql_function_result(&name, &arg_exprs, &arg_types),
-            SqlDialect::PostgreSQL => postgresql_function_result(&name, &arg_types),
+            SqlDialect::PostgreSQL => postgresql_function_result(&name, &arg_types, has_named_args),
             _ => None,
         };
         if let Some(column) = dialect_result {
@@ -1932,7 +1940,7 @@ impl<'s> Analyzer<'s> {
 
 /// PostgreSQL functions whose result type the shared table does not know.
 /// `None` falls back to it.
-fn postgresql_function_result(name: &str, args: &[Column]) -> Option<Column> {
+fn postgresql_function_result(name: &str, args: &[Column], has_named_args: bool) -> Option<Column> {
     use SqlType::*;
     let any_nullable = args.iter().any(|a| a.type_info.nullable);
 
@@ -1947,9 +1955,14 @@ fn postgresql_function_result(name: &str, args: &[Column]) -> Option<Column> {
         | "jsonb_strip_nulls" | "json_strip_nulls" => anonymous(Json, any_nullable),
         // NULL only from target, path or create_if_missing; a NULL new_value is
         // handled by null_value_treatment.
+        // With named arguments the positions are unknown: stay conservative.
         "jsonb_set_lax" => anonymous(
             Json,
-            [0, 1, 3].iter().any(|&i| args.get(i).is_some_and(|a| a.type_info.nullable)),
+            if has_named_args {
+                any_nullable
+            } else {
+                [0, 1, 3].iter().any(|&i| args.get(i).is_some_and(|a| a.type_info.nullable))
+            },
         ),
         // Aggregates over no rows return NULL.
         "json_agg" | "jsonb_agg" | "json_object_agg" | "jsonb_object_agg" => anonymous(Json, true),

@@ -120,19 +120,24 @@ class ArrayAndLaxRow(pydantic.BaseModel):
     """One result row of `array_and_lax`."""
 
     pair: list[int | None]
+    parenthesized_pair: list[int | None]
     lax: typing.Any
+    named_lax: typing.Any | None
 
 
 class ArrayAndLaxParams(pydantic.BaseModel):
     """Parameters of `array_and_lax`."""
 
     id: int
+    id_2: int
 
 
 ARRAY_AND_LAX = """
 SELECT
     ARRAY[$1, id] AS pair,
-    jsonb_set_lax('{}'::jsonb, '{k}', meta) AS lax
+    ARRAY[($2), id] AS parenthesized_pair,
+    jsonb_set_lax('{}'::jsonb, '{k}', meta) AS lax,
+    jsonb_set_lax(replacement => '{}'::jsonb, path => '{k}', jsonb_in => meta) AS named_lax
 FROM items
 ORDER BY id
 """
@@ -142,7 +147,8 @@ async def array_and_lax(
     connection: asyncpg.Connection | asyncpg.Pool,
     *,
     id: int,
+    id_2: int,
 ) -> list[ArrayAndLaxRow]:
     """Runs `array_and_lax`."""
-    params = tuple(ArrayAndLaxParams(id=id).model_dump(by_alias=True).values())
+    params = tuple(ArrayAndLaxParams(id=id, id_2=id_2).model_dump(by_alias=True).values())
     return [ArrayAndLaxRow.model_validate(_row_dict(ArrayAndLaxRow, row)) for row in await connection.fetch(ARRAY_AND_LAX, *params)]
