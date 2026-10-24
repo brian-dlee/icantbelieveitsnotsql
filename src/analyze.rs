@@ -184,11 +184,13 @@ fn apply_alias_columns(columns: &mut [Column], alias: &TableAlias) {
     }
 }
 
+/// A placeholder, possibly wrapped in parentheses (`($1)`).
 fn is_placeholder(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Value(v) if matches!(v.value, Value::Placeholder(_))
-    )
+    match expr {
+        Expr::Nested(inner) => is_placeholder(inner),
+        Expr::Value(v) => matches!(v.value, Value::Placeholder(_)),
+        _ => false,
+    }
 }
 
 fn numbered_dollar_placeholder(token: &str) -> Option<usize> {
@@ -1490,6 +1492,44 @@ impl<'s> Analyzer<'s> {
                     declared: Some(typed.data_type.to_string()),
                 },
             )),
+            // `ARRAY[a, b]`: an array of the elements' unified type.
+            Expr::Array(array) => {
+                // Settle the element type from the non-placeholder elements
+                // first, so a leading placeholder (`ARRAY[$1, 1]`) gets it too.
+                // Parameters are ordered by position, so the walk order is free.
+                let mut element: Option<Column> = None;
+                for item in array.elem.iter().filter(|item| !is_placeholder(item)) {
+                    let column = self.walk_expr(item, element.as_ref(), None, scope)?;
+                    element = Some(match element {
+                        Some(previous) => unify_columns(&previous, &column),
+                        None => column,
+                    });
+                }
+                for item in array.elem.iter().filter(|item| is_placeholder(item)) {
+                    let expected = element.clone().map(|e| comparison_target(&e));
+                    let column = self.walk_expr(item, expected.as_ref(), None, scope)?;
+                    if element.is_none() {
+                        element = Some(column);
+                    }
+                }
+                let element_type = element.as_ref().and_then(|e| {
+                    e.type_info
+                        .declared
+                        .clone()
+                        .or_else(|| postgresql_type_name(e.type_info.sql_type).map(str::to_string))
+                });
+                Ok(match (element, element_type) {
+                    (Some(element), Some(name)) => Column::new(
+                        "",
+                        TypeInfo {
+                            sql_type: element.type_info.sql_type,
+                            nullable: false,
+                            declared: Some(format!("{}[]", name)),
+                        },
+                    ),
+                    _ => anonymous(SqlType::Any, false),
+                })
+            }
             Expr::Interval(interval) => {
                 // `INTERVAL ? DAY` (MySQL) takes a count for a single unit;
                 // otherwise the value is an interval string such as '1 day'.
@@ -1592,7 +1632,25 @@ impl<'s> Analyzer<'s> {
             }
             StringConcat => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
-                Ok(anonymous(SqlType::Text, l.type_info.nullable || r.type_info.nullable))
+                let nullable = l.type_info.nullable || r.type_info.nullable;
+                // PostgreSQL's `jsonb || jsonb` merges JSON values. With a typed
+                // text operand it picks `text || anynonarray` instead, so the
+                // other side must be JSON or something PostgreSQL resolves to
+                // JSON: an untyped string literal, a placeholder, or unknown.
+                let resolves_to_json = |column: &Column, expr: &Expr| {
+                    let mut expr = expr;
+                    while let Expr::Nested(inner) = expr {
+                        expr = inner;
+                    }
+                    column.type_info.sql_type == SqlType::Json
+                        || column.type_info.sql_type == SqlType::Any
+                        || is_placeholder(expr)
+                        || matches!(expr, Expr::Value(v) if matches!(v.value, Value::SingleQuotedString(_)))
+                };
+                let json = self.dialect == SqlDialect::PostgreSQL
+                    && ((l.type_info.sql_type == SqlType::Json && resolves_to_json(&r, right))
+                        || (r.type_info.sql_type == SqlType::Json && resolves_to_json(&l, left)));
+                Ok(anonymous(if json { SqlType::Json } else { SqlType::Text }, nullable))
             }
             Arrow | HashArrow => {
                 self.walk_expr(left, None, None, scope)?;
@@ -1631,6 +1689,12 @@ impl<'s> Analyzer<'s> {
         let mut arg_types: Vec<Column> = Vec::new();
         let mut arg_exprs: Vec<&Expr> = Vec::new();
         let mut has_wildcard = false;
+        // `f(name => value)` may reorder arguments, so position-based rules can't apply.
+        let has_named_args = matches!(
+            &function.args,
+            FunctionArguments::List(list)
+                if list.args.iter().any(|a| !matches!(a, FunctionArg::Unnamed(_)))
+        );
 
         match &function.args {
             FunctionArguments::None => {}
@@ -1682,10 +1746,13 @@ impl<'s> Analyzer<'s> {
             self.walk_expr(filter, None, None, scope)?;
         }
 
-        if self.dialect == SqlDialect::MySQL {
-            if let Some(column) = mysql_function_result(&name, &arg_exprs, &arg_types) {
-                return Ok(column);
-            }
+        let dialect_result = match self.dialect {
+            SqlDialect::MySQL => mysql_function_result(&name, &arg_exprs, &arg_types),
+            SqlDialect::PostgreSQL => postgresql_function_result(&name, &arg_types, has_named_args),
+            _ => None,
+        };
+        if let Some(column) = dialect_result {
+            return Ok(column);
         }
         Ok(self.function_result(&name, &arg_types, has_wildcard))
     }
@@ -1869,6 +1936,74 @@ impl<'s> Analyzer<'s> {
             }
         }
     }
+}
+
+/// PostgreSQL functions whose result type the shared table does not know.
+/// `None` falls back to it.
+fn postgresql_function_result(name: &str, args: &[Column], has_named_args: bool) -> Option<Column> {
+    use SqlType::*;
+    let any_nullable = args.iter().any(|a| a.type_info.nullable);
+
+    let column = match name {
+        // Builders always return a value, even from NULL arguments.
+        "json_build_object" | "jsonb_build_object" | "json_build_array" | "jsonb_build_array" => {
+            anonymous(Json, false)
+        }
+        // json[b]_object take text arrays and are strict.
+        "json_object" | "jsonb_object" | "to_json" | "to_jsonb" | "row_to_json" | "array_to_json"
+        | "jsonb_set" | "jsonb_insert"
+        | "jsonb_strip_nulls" | "json_strip_nulls" => anonymous(Json, any_nullable),
+        // NULL only from target, path or create_if_missing; a NULL new_value is
+        // handled by null_value_treatment.
+        // With named arguments the positions are unknown: stay conservative.
+        "jsonb_set_lax" => anonymous(
+            Json,
+            if has_named_args {
+                any_nullable
+            } else {
+                [0, 1, 3].iter().any(|&i| args.get(i).is_some_and(|a| a.type_info.nullable))
+            },
+        ),
+        // Aggregates over no rows return NULL.
+        "json_agg" | "jsonb_agg" | "json_object_agg" | "jsonb_object_agg" => anonymous(Json, true),
+        "array_agg" => {
+            let element = args.first()?;
+            let element_type = element
+                .type_info
+                .declared
+                .clone()
+                .or_else(|| postgresql_type_name(element.type_info.sql_type).map(str::to_string))?;
+            Column::new(
+                "",
+                TypeInfo {
+                    sql_type: element.type_info.sql_type,
+                    nullable: true,
+                    declared: Some(format!("{}[]", element_type)),
+                },
+            )
+        }
+        _ => return None,
+    };
+    Some(column)
+}
+
+/// A PostgreSQL type name for a value with no declared type (array_agg of an expression).
+fn postgresql_type_name(sql_type: SqlType) -> Option<&'static str> {
+    use SqlType::*;
+    Some(match sql_type {
+        Int => "BIGINT",
+        Float => "DOUBLE PRECISION",
+        Numeric => "NUMERIC",
+        Text => "TEXT",
+        Blob => "BYTEA",
+        Bool => "BOOLEAN",
+        Date => "DATE",
+        Time => "TIME",
+        DateTime => "TIMESTAMPTZ",
+        Interval => "INTERVAL",
+        Json => "JSONB",
+        Any => return None,
+    })
 }
 
 /// Fractional-second precision of a declared `DATETIME(n)`, `TIMESTAMP(n)` or
