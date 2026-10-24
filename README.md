@@ -309,3 +309,15 @@ without a custom codec. If you register a codec, override the type with
 
 MySQL's `VALUES(column)` function in `ON DUPLICATE KEY UPDATE` clauses is
 properly typed: it refers to the value proposed by the `INSERT` for that column.
+
+`TIME` values (columns, `TIME(...)`, `CURTIME()`) are typed
+`datetime.timedelta` for `pymysql` and `aiomysql`, because that is what those
+drivers return: MySQL `TIME` can exceed 24 hours.
+
+MySQL date and time functions follow MySQL's own result types:
+- `DATE()` gives a date and `TIME()` a time (in SQLite both return text).
+- `DATE_ADD`/`DATE_SUB` keep a `DATE` for day-or-larger units and give a
+  `DATETIME` otherwise.
+- `STR_TO_DATE` gives a date or datetime depending on its format string.
+- `UNIX_TIMESTAMP` of a fractional `DATETIME(n)` is a decimal.
+- `CONVERT_TZ` is nullable, because it returns `NULL` for an unknown time zone.

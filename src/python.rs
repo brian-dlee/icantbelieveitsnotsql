@@ -320,6 +320,13 @@ impl<'c> TypeResolver<'c> {
             return String::from("uuid.UUID");
         }
 
+        // PyMySQL and aiomysql return MySQL TIME values (which may exceed
+        // 24 hours) as datetime.timedelta.
+        if matches!(self.driver, Driver::Pymysql | Driver::Aiomysql) && type_info.sql_type == SqlType::Time {
+            self.imports.insert(String::from("datetime"));
+            return String::from("datetime.timedelta");
+        }
+
         // Without a registered codec, asyncpg, PyMySQL and aiomysql bind JSON
         // as text, so JSON parameters take serialized JSON (`json.dumps(...)`).
         if is_param && type_info.sql_type == SqlType::Json && self.driver != Driver::Aiosqlite {
