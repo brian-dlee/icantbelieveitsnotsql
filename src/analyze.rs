@@ -1627,6 +1627,10 @@ impl<'s> Analyzer<'s> {
                 // other side must be JSON or something PostgreSQL resolves to
                 // JSON: an untyped string literal, a placeholder, or unknown.
                 let resolves_to_json = |column: &Column, expr: &Expr| {
+                    let mut expr = expr;
+                    while let Expr::Nested(inner) = expr {
+                        expr = inner;
+                    }
                     column.type_info.sql_type == SqlType::Json
                         || column.type_info.sql_type == SqlType::Any
                         || is_placeholder(expr)

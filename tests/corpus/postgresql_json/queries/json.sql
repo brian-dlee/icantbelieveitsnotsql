@@ -26,6 +26,7 @@ SELECT jsonb_agg(id) AS ids, array_agg(id) AS id_array FROM items WHERE id < 0;
 -- name: concat_kinds :many
 SELECT
     meta || '{"extra": true}' AS json_with_literal,
+    meta || ('{"nested": true}') AS json_with_nested_literal,
     meta || owner AS text_concat,
     jsonb_object(ARRAY['a', label]) AS from_pairs
 FROM items

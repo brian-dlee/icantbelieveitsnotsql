@@ -90,6 +90,7 @@ class ConcatKindsRow(pydantic.BaseModel):
     """One result row of `concat_kinds`."""
 
     json_with_literal: typing.Any | None
+    json_with_nested_literal: typing.Any | None
     text_concat: str | None
     from_pairs: typing.Any
 
@@ -97,6 +98,7 @@ class ConcatKindsRow(pydantic.BaseModel):
 CONCAT_KINDS = """
 SELECT
     meta || '{"extra": true}' AS json_with_literal,
+    meta || ('{"nested": true}') AS json_with_nested_literal,
     meta || owner AS text_concat,
     jsonb_object(ARRAY['a', label]) AS from_pairs
 FROM items
