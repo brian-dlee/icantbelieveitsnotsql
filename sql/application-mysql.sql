@@ -475,7 +475,7 @@ SET SESSION max_execution_time = 600000;
 --
 -- These are built in Python today. See the README section "Queries that would
 -- otherwise be built at runtime" for the static form of each; the
--- mysql_static_idioms corpus case exercises them.
+-- mysql_static_idioms corpus case exercises most of them.
 --
 -- 1. Optional WHERE fragments appended only when a filter is set
 --    (`where += " AND col >= %(x)s"`), and lists of conditions joined with

@@ -250,7 +250,7 @@ SET LOCAL lock_timeout = '5s';
 -- ------------------------------------------------------------ dynamic SQL
 --
 -- Built in Python today; the postgresql_static_idioms corpus case shows the
--- static forms (optional filters with casts, set_config for SET LOCAL).
+-- main static forms (optional filters with casts, set_config for SET LOCAL).
 -- 1. Condition lists joined with " AND " where each condition numbers its
 --    parameter as `${len(params)}`.
 -- 2. Column names interpolated into `SET {col} = EXCLUDED.{col}` and a

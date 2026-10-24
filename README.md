@@ -202,8 +202,10 @@ transaction. Run it and the queries it should affect on one connection inside
 `connection.transaction()`. Given a pool, the generated function runs it on
 whichever connection it borrows, and the setting is gone before the next call.
 
-The `mysql_static_idioms` and `postgresql_static_idioms` corpus cases contain
-each of these and were checked against MySQL 5.7 and PostgreSQL 16.
+The `mysql_static_idioms` and `postgresql_static_idioms` corpus cases both cover
+the optional filter, `LIMIT`, list, sort and setting rows. MySQL also has the
+`FOR UPDATE` pair and PostgreSQL the keyset query. Both were checked against
+MySQL 5.7 and PostgreSQL 16.
 
 ### Result columns
 
