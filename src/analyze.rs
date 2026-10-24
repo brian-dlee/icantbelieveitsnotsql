@@ -1317,8 +1317,14 @@ impl<'s> Analyzer<'s> {
                         columns.len()
                     ));
                 }
-                let expected = comparison_target(&columns[0]);
-                self.walk_expr(expr, Some(&expected), Some(&columns[0].name), scope)?;
+                // A generated `column_N` name must not become a parameter name.
+                let mut target = columns[0].clone();
+                if is_generated_name(&target) {
+                    target.name = String::new();
+                }
+                let expected = comparison_target(&target);
+                let hint = Some(target.name.as_str()).filter(|name| !name.is_empty());
+                self.walk_expr(expr, Some(&expected), hint, scope)?;
                 Ok(anonymous(SqlType::Bool, false))
             }
             Expr::Between { expr, low, high, .. } => {
@@ -1983,6 +1989,15 @@ fn raw_type(raw: &RawParam) -> TypeInfo {
 
 /// A placeholder compared with a column should not be nullable by default:
 /// `col = NULL` never matches. `IS NULL` checks re-enable nullability.
+/// True for the `column_N` name given to an unaliased SELECT expression.
+fn is_generated_name(column: &Column) -> bool {
+    column.source.is_none()
+        && column
+            .name
+            .strip_prefix("column_")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn comparison_target(column: &Column) -> Column {
     let mut target = column.clone();
     target.type_info.nullable = false;

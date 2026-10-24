@@ -419,6 +419,15 @@ fn derived_table_names_still_warn_inside_exists() {
 }
 
 #[test]
+fn in_subquery_generated_name_does_not_name_the_parameter() {
+    let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT 1 + 2)");
+    assert_eq!(param_summary(&analysis)[0].0, "param_1");
+    // A real column name still names the parameter.
+    let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT user_id FROM orders)");
+    assert_eq!(param_summary(&analysis)[0].0, "user_id");
+}
+
+#[test]
 fn sqlite_current_time_keywords_are_text() {
     let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(
