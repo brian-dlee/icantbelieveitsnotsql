@@ -2004,8 +2004,9 @@ fn function_arg_expectation(
         {
             Some(typed_hint("", SqlType::DateTime))
         }
+        "timestampdiff" if index > 0 => Some(typed_hint("", SqlType::DateTime)),
         "timestampadd" if index == 1 => int(),
-        "timestampdiff" | "timestampadd" if index > 0 => Some(typed_hint("", SqlType::DateTime)),
+        "timestampadd" if index == 2 => Some(typed_hint("", SqlType::DateTime)),
         "date_format" | "str_to_date" => text(),
         "from_unixtime" if index == 0 => int(),
         "date_trunc" | "date_part" if index == 0 => text(),
