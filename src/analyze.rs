@@ -2008,7 +2008,8 @@ fn function_arg_expectation(
         "timestampadd" if index == 1 => int(),
         "timestampadd" if index == 2 => Some(typed_hint("", SqlType::DateTime)),
         "date_format" | "str_to_date" => text(),
-        "from_unixtime" if index == 0 => int(),
+        // Unix timestamps may carry fractional seconds.
+        "from_unixtime" if index == 0 => float(),
         "date_trunc" | "date_part" if index == 0 => text(),
         "to_char" | "to_date" | "to_timestamp" if index == 1 => text(),
         "to_date" => text(),

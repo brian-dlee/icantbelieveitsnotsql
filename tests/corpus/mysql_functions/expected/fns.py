@@ -35,6 +35,7 @@ class ProbeRow(pydantic.BaseModel):
     epoch_day: int
     epoch_param: float
     before_epoch: datetime.datetime | None
+    from_epoch: datetime.datetime | None
     later_by: datetime.datetime
     epoch_ts: datetime.datetime | None
     minutes: int
@@ -59,6 +60,7 @@ class ProbeParams(pydantic.BaseModel):
 
     start: datetime.datetime
     moment: datetime.datetime
+    epoch: float
     minutes: int
     cutoff: datetime.date
     id: int
@@ -81,6 +83,7 @@ SELECT
     UNIX_TIMESTAMP(e.day) AS epoch_day,
     UNIX_TIMESTAMP(%(moment)s) AS epoch_param,
     FROM_UNIXTIME(-1) AS before_epoch,
+    FROM_UNIXTIME(%(epoch)s) AS from_epoch,
     TIMESTAMPADD(MINUTE, %(minutes)s, e.at0) AS later_by,
     FROM_UNIXTIME(0) AS epoch_ts,
     TIMESTAMPDIFF(MINUTE, e.at0, e.at3) AS minutes,
@@ -108,12 +111,13 @@ def probe(
     *,
     start: datetime.datetime,
     moment: datetime.datetime,
+    epoch: float,
     minutes: int,
     cutoff: datetime.date,
     id: int,
 ) -> ProbeRow | None:
     """Runs `probe`."""
-    params = ProbeParams(start=start, moment=moment, minutes=minutes, cutoff=cutoff, id=id).model_dump(by_alias=True)
+    params = ProbeParams(start=start, moment=moment, epoch=epoch, minutes=minutes, cutoff=cutoff, id=id).model_dump(by_alias=True)
     cursor.execute(PROBE, params)
     row = cursor.fetchone()
     return ProbeRow.model_validate(_row_dict(ProbeRow, row)) if row is not None else None

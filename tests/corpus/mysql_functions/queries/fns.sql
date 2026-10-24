@@ -17,6 +17,7 @@ SELECT
     UNIX_TIMESTAMP(e.day) AS epoch_day,
     UNIX_TIMESTAMP(:moment) AS epoch_param,
     FROM_UNIXTIME(-1) AS before_epoch,
+    FROM_UNIXTIME(:epoch) AS from_epoch,
     TIMESTAMPADD(MINUTE, :minutes, e.at0) AS later_by,
     FROM_UNIXTIME(0) AS epoch_ts,
     TIMESTAMPDIFF(MINUTE, e.at0, e.at3) AS minutes,
