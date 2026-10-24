@@ -321,3 +321,8 @@ MySQL date and time functions follow MySQL's own result types:
 - `STR_TO_DATE` gives a date or datetime depending on its format string.
 - `UNIX_TIMESTAMP` of a fractional `DATETIME(n)` is a decimal.
 - `CONVERT_TZ` is nullable, because it returns `NULL` for an unknown time zone.
+
+`TINYINT(1)` (and its alias `BOOL`/`BOOLEAN`) is typed `bool`, following the
+MySQL convention Prisma also uses. The driver returns `0`/`1`, which pydantic
+converts. Wider `TINYINT(n)` columns stay `int`. Use
+`[generate.python.column-types]` for a `TINYINT(1)` column that holds numbers.

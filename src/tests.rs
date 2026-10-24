@@ -329,6 +329,10 @@ fn schema_type_affinity() {
     assert_eq!(SqlType::from_type_name("INTERVAL"), SqlType::Interval);
     assert_eq!(SqlType::from_type_name("INTERVAL DAY TO SECOND"), SqlType::Interval);
     assert_eq!(SqlType::from_type_name("TIMETZ"), SqlType::Time);
+    assert_eq!(SqlType::from_type_name("TINYINT(1)"), SqlType::Bool);
+    assert_eq!(SqlType::from_type_name("tinyint(1) unsigned"), SqlType::Bool);
+    assert_eq!(SqlType::from_type_name("TINYINT(4)"), SqlType::Int);
+    assert_eq!(SqlType::from_type_name("TINYINT"), SqlType::Int);
 }
 
 #[test]
