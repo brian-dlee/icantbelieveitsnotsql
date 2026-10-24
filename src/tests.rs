@@ -375,6 +375,62 @@ fn numeric_style_rewrites_positional_list_parameters() {
 }
 
 #[test]
+fn recursive_cte_resolves_its_own_name_once() {
+    let analysis = ok("
+        WITH RECURSIVE chain(id, depth) AS (
+            SELECT id, 0 FROM users WHERE id = ?
+            UNION ALL
+            SELECT u.id, c.depth + 1 FROM users u JOIN chain c ON u.id = c.id + 1 WHERE u.age > ?
+        )
+        SELECT id, depth FROM chain");
+    assert_eq!(
+        column_summary(&analysis),
+        vec![("id".into(), SqlType::Int, false), ("depth".into(), SqlType::Int, false)]
+    );
+    // Each placeholder is recorded once even though the body is analyzed repeatedly.
+    assert_eq!(
+        param_summary(&analysis),
+        vec![("id".into(), SqlType::Int, false), ("age".into(), SqlType::Int, false)]
+    );
+    assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+}
+
+#[test]
+fn recursive_cte_widening_cascades_until_settled() {
+    let analysis = ok("
+        WITH RECURSIVE c(a, b, d) AS (
+            SELECT 1, 1, 1
+            UNION ALL
+            SELECT a + 0.5, b + a, d + b FROM c WHERE a < 3
+        )
+        SELECT a, b, d FROM c");
+    let types: Vec<SqlType> = analysis.columns.iter().map(|c| c.type_info.sql_type).collect();
+    assert_eq!(types, vec![SqlType::Float, SqlType::Float, SqlType::Float]);
+}
+
+#[test]
+fn derived_table_names_still_warn_inside_exists() {
+    let analysis = ok("SELECT id FROM users WHERE EXISTS (SELECT d.column_1 FROM (SELECT 1 + 2) AS d)");
+    assert!(
+        analysis.warnings.iter().any(|w| w.contains("unaliased expression `1 + 2`")),
+        "{:?}",
+        analysis.warnings
+    );
+}
+
+#[test]
+fn in_subquery_generated_name_does_not_name_the_parameter() {
+    let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT 1 + 2)");
+    assert_eq!(param_summary(&analysis)[0].0, "param_1");
+    // An explicit alias is kept, even one that looks generated.
+    let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT 1 + 2 AS column_1)");
+    assert_eq!(param_summary(&analysis)[0].0, "column_1");
+    // A real column name still names the parameter.
+    let analysis = ok("SELECT id FROM users WHERE ? IN (SELECT user_id FROM orders)");
+    assert_eq!(param_summary(&analysis)[0].0, "user_id");
+}
+
+#[test]
 fn sqlite_current_time_keywords_are_text() {
     let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(

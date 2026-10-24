@@ -278,6 +278,10 @@ pub struct Analyzer<'s> {
     dialect: SqlDialect,
     params: Vec<RawParam>,
     warnings: Vec<String>,
+    /// Above zero while analyzing a query whose output column names are
+    /// never used (EXISTS/IN/scalar subqueries, later set-operation arms,
+    /// CTEs and derived tables with an explicit column list).
+    unnamed_depth: usize,
 }
 
 pub fn analyze_statement(
@@ -290,6 +294,7 @@ pub fn analyze_statement(
         dialect,
         params: Vec::new(),
         warnings: Vec::new(),
+        unnamed_depth: 0,
     };
     let root = Scope::default();
 
@@ -345,11 +350,30 @@ pub fn analyze_view_columns(query: &Query, schema: &Schema, dialect: SqlDialect)
         dialect,
         params: Vec::new(),
         warnings: Vec::new(),
+        unnamed_depth: 0,
     };
     analyzer.analyze_query(query, None)
 }
 
 impl<'s> Analyzer<'s> {
+    /// Runs `analyze` with the "unaliased expression" warning active again,
+    /// for nested queries whose column names are used (derived tables and
+    /// CTEs without a column list) inside a quiet context.
+    fn loudly<T>(&mut self, analyze: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        let saved = std::mem::replace(&mut self.unnamed_depth, 0);
+        let result = analyze(self);
+        self.unnamed_depth = saved;
+        result
+    }
+
+    /// Runs `analyze` with the "unaliased expression" warning silenced.
+    fn quietly<T>(&mut self, analyze: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        self.unnamed_depth += 1;
+        let result = analyze(self);
+        self.unnamed_depth -= 1;
+        result
+    }
+
     fn warn(&mut self, message: String) {
         if !self.warnings.contains(&message) {
             self.warnings.push(message);
@@ -566,12 +590,58 @@ impl<'s> Analyzer<'s> {
 
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
-                let mut columns = self.analyze_query(&cte.query, Some(&cte_scope))?;
+                let name = cte.alias.name.value.clone();
+                // `name(a, b) AS (...)` names the columns itself; otherwise the
+                // body's names are used even inside a quiet context. An error
+                // abandons the whole analysis, so the counter needs no reset then.
+                let saved_depth = self.unnamed_depth;
+                self.unnamed_depth = if cte.alias.columns.is_empty() { 0 } else { saved_depth + 1 };
+                let anchor = match cte.query.body.as_ref() {
+                    SetExpr::SetOperation { left, .. } if with.recursive => Some(left),
+                    _ => None,
+                };
+
+                let columns = if let Some(anchor) = anchor {
+                    // A recursive CTE refers to itself: type it from the anchor
+                    // arm, then re-analyze the whole body against that until the
+                    // recursive arm stops widening it. Widening can cascade
+                    // (`b + a` widens after `a` does), but each column only
+                    // widens a few times, so one pass per column plus two
+                    // always settles. Only the last pass keeps its parameters
+                    // and warnings.
+                    let (params_mark, warnings_mark) = (self.params.len(), self.warnings.len());
+                    let mut columns = self.analyze_set_expr(anchor, &cte_scope, None)?;
+                    let max_passes = columns.len() + 2;
+                    for pass in 0..max_passes {
+                        self.params.truncate(params_mark);
+                        self.warnings.truncate(warnings_mark);
+                        apply_alias_columns(&mut columns, &cte.alias);
+                        let mut recursive_scope = Scope {
+                            parent: Some(&cte_scope),
+                            ..Default::default()
+                        };
+                        recursive_scope.ctes.push(Table {
+                            name: name.clone(),
+                            columns: columns.clone(),
+                        });
+                        let next = self.analyze_query(&cte.query, Some(&recursive_scope))?;
+                        let settled = next.len() == columns.len()
+                            && next.iter().zip(&columns).all(|(a, b)| a.type_info == b.type_info);
+                        if settled || pass + 1 == max_passes {
+                            columns = next;
+                            break;
+                        }
+                        columns = next;
+                    }
+                    columns
+                } else {
+                    self.analyze_query(&cte.query, Some(&cte_scope))?
+                };
+
+                self.unnamed_depth = saved_depth;
+                let mut columns = columns;
                 apply_alias_columns(&mut columns, &cte.alias);
-                cte_scope.ctes.push(Table {
-                    name: cte.alias.name.value.clone(),
-                    columns,
-                });
+                cte_scope.ctes.push(Table { name, columns });
             }
         }
 
@@ -593,7 +663,8 @@ impl<'s> Analyzer<'s> {
             }
             SetExpr::SetOperation { left, right, .. } => {
                 let left_columns = self.analyze_set_expr(left, scope, None)?;
-                let right_columns = self.analyze_set_expr(right, scope, None)?;
+                // Set operations take their column names from the first arm.
+                let right_columns = self.quietly(|a| a.analyze_set_expr(right, scope, None))?;
 
                 if left_columns.len() != right_columns.len() {
                     return Err(format!(
@@ -772,10 +843,12 @@ impl<'s> Analyzer<'s> {
             Expr::Function(function) => object_name_last(&function.name).to_lowercase(),
             _ => {
                 let name = format!("column_{}", index + 1);
-                self.warn(format!(
-                    "unaliased expression `{}` in SELECT is exposed as `{}`; add `AS <name>`",
-                    expr, name
-                ));
+                if self.unnamed_depth == 0 {
+                    self.warn(format!(
+                        "unaliased expression `{}` in SELECT is exposed as `{}`; add `AS <name>`",
+                        expr, name
+                    ));
+                }
                 name
             }
         }
@@ -906,7 +979,12 @@ impl<'s> Analyzer<'s> {
                 });
             }
             TableFactor::Derived { subquery, alias, .. } => {
-                let mut columns = self.analyze_query(subquery, Some(&*scope))?;
+                let named_by_alias = alias.as_ref().is_some_and(|a| !a.columns.is_empty());
+                let mut columns = if named_by_alias {
+                    self.quietly(|a| a.analyze_query(subquery, Some(&*scope)))?
+                } else {
+                    self.loudly(|a| a.analyze_query(subquery, Some(&*scope)))?
+                };
                 let name = alias
                     .as_ref()
                     .map(|a| a.name.value.clone())
@@ -1232,15 +1310,21 @@ impl<'s> Analyzer<'s> {
                 Ok(anonymous(SqlType::Bool, false))
             }
             Expr::InSubquery { expr, subquery, .. } => {
-                let columns = self.analyze_query(subquery, Some(scope))?;
+                let columns = self.quietly(|a| a.analyze_query(subquery, Some(scope)))?;
                 if columns.len() != 1 {
                     return Err(format!(
                         "IN (subquery) must select exactly one column, got {}",
                         columns.len()
                     ));
                 }
-                let expected = comparison_target(&columns[0]);
-                self.walk_expr(expr, Some(&expected), Some(&columns[0].name), scope)?;
+                // A generated `column_N` name must not become a parameter name.
+                let mut target = columns[0].clone();
+                if selects_unaliased_expression(subquery) {
+                    target.name = String::new();
+                }
+                let expected = comparison_target(&target);
+                let hint = Some(target.name.as_str()).filter(|name| !name.is_empty());
+                self.walk_expr(expr, Some(&expected), hint, scope)?;
                 Ok(anonymous(SqlType::Bool, false))
             }
             Expr::Between { expr, low, high, .. } => {
@@ -1324,11 +1408,11 @@ impl<'s> Analyzer<'s> {
                 Ok(anonymous(SqlType::Bool, l.type_info.nullable || r.type_info.nullable))
             }
             Expr::Exists { subquery, .. } => {
-                self.analyze_query(subquery, Some(scope))?;
+                self.quietly(|a| a.analyze_query(subquery, Some(scope)))?;
                 Ok(anonymous(SqlType::Bool, false))
             }
             Expr::Subquery(subquery) => {
-                let columns = self.analyze_query(subquery, Some(scope))?;
+                let columns = self.quietly(|a| a.analyze_query(subquery, Some(scope)))?;
                 let mut column = columns
                     .into_iter()
                     .next()
@@ -1905,6 +1989,25 @@ fn raw_type(raw: &RawParam) -> TypeInfo {
 
 /// A placeholder compared with a column should not be nullable by default:
 /// `col = NULL` never matches. `IS NULL` checks re-enable nullability.
+/// True when a single-column query's output name is generated (`column_N`):
+/// its first select item is an unaliased expression other than a column
+/// reference or function call. Set operations take names from the first arm.
+fn selects_unaliased_expression(query: &Query) -> bool {
+    fn first_item(body: &SetExpr) -> Option<&SelectItem> {
+        match body {
+            SetExpr::Select(select) => select.projection.first(),
+            SetExpr::Query(query) => first_item(&query.body),
+            SetExpr::SetOperation { left, .. } => first_item(left),
+            _ => None,
+        }
+    }
+    matches!(
+        first_item(&query.body),
+        Some(SelectItem::UnnamedExpr(expr))
+            if !matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Function(_))
+    )
+}
+
 fn comparison_target(column: &Column) -> Column {
     let mut target = column.clone();
     target.type_info.nullable = false;
