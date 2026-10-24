@@ -274,3 +274,37 @@ async def widgets_in_array(
     """Runs `widgets_in_array`."""
     params = tuple(WidgetsInArrayParams(ids=ids).model_dump(by_alias=True).values())
     return [WidgetsInArrayRow.model_validate(_row_dict(WidgetsInArrayRow, row)) for row in await connection.fetch(WIDGETS_IN_ARRAY, *params)]
+
+
+# ---- claim_widgets (:many) ----
+
+
+class ClaimWidgetsRow(pydantic.BaseModel):
+    """One result row of `claim_widgets`."""
+
+    id: int
+    name: str
+
+
+class ClaimWidgetsParams(pydantic.BaseModel):
+    """Parameters of `claim_widgets`."""
+
+    batch_size: int
+
+
+CLAIM_WIDGETS = """
+SELECT id, name FROM widgets
+ORDER BY id
+FOR UPDATE SKIP LOCKED
+LIMIT $1
+"""
+
+
+async def claim_widgets(
+    connection: asyncpg.Connection | asyncpg.Pool,
+    *,
+    batch_size: int,
+) -> list[ClaimWidgetsRow]:
+    """Runs `claim_widgets`."""
+    params = tuple(ClaimWidgetsParams(batch_size=batch_size).model_dump(by_alias=True).values())
+    return [ClaimWidgetsRow.model_validate(_row_dict(ClaimWidgetsRow, row)) for row in await connection.fetch(CLAIM_WIDGETS, *params)]
