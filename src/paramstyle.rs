@@ -27,7 +27,7 @@ pub fn list_token(style: ParamStyle, name: &str) -> String {
 }
 
 /// Byte offset of a 1-based line/column (columns count characters).
-fn byte_offset(sql: &str, line_starts: &[usize], location: Location) -> usize {
+pub fn byte_offset(sql: &str, line_starts: &[usize], location: Location) -> usize {
     let line_start = line_starts[(location.line as usize).saturating_sub(1).min(line_starts.len() - 1)];
     sql[line_start..]
         .char_indices()
@@ -212,6 +212,57 @@ pub fn rewrite(
     push_literal(&mut out, &sql[cursor..], style, bound);
 
     Ok(out)
+}
+
+/// PostgreSQL accepts a locking clause (`FOR UPDATE ... SKIP LOCKED`) before
+/// `LIMIT`/`OFFSET`, but sqlparser only parses it after them. Returns `sql`
+/// with a top-level locking clause moved after a following `LIMIT`/`OFFSET`,
+/// or `None` when there is nothing to move. Used only to parse: the original
+/// text is what gets executed.
+pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<String> {
+    let tokens = Tokenizer::new(dialect, sql).tokenize_with_location().ok()?;
+    let mut line_starts = vec![0];
+    line_starts.extend(sql.match_indices('\n').map(|(i, _)| i + 1));
+    let offset = |location: Location| byte_offset(sql, &line_starts, location);
+
+    let mut depth = 0usize;
+    let mut lock_start: Option<usize> = None;
+    let mut limit_start: Option<usize> = None;
+    for (index, token) in tokens.iter().enumerate() {
+        match &token.token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::Word(w) if depth == 0 => {
+                if lock_start.is_none() && w.keyword == Keyword::FOR {
+                    let next = next_significant(&tokens, index).map(|i| &tokens[i].token);
+                    if matches!(next, Some(t) if is_keyword(t, Keyword::UPDATE)
+                        || is_keyword(t, Keyword::SHARE)
+                        || is_keyword(t, Keyword::NO)
+                        || is_keyword(t, Keyword::KEY))
+                    {
+                        lock_start = Some(offset(token.span.start));
+                    }
+                } else if lock_start.is_some() && matches!(w.keyword, Keyword::LIMIT | Keyword::OFFSET) {
+                    limit_start = Some(offset(token.span.start));
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (lock, limit) = (lock_start?, limit_start?);
+    let end = sql.trim_end().trim_end_matches(';').trim_end().len();
+    if limit >= end {
+        return None;
+    }
+    Some(format!(
+        "{}{} {}{}",
+        &sql[..lock],
+        &sql[limit..end],
+        sql[lock..limit].trim_end(),
+        &sql[end..]
+    ))
 }
 
 fn push_literal(out: &mut String, text: &str, style: ParamStyle, bound: bool) {

@@ -431,6 +431,28 @@ fn in_subquery_generated_name_does_not_name_the_parameter() {
 }
 
 #[test]
+fn locking_clause_moves_after_limit_for_parsing() {
+    use crate::paramstyle::move_locking_after_limit;
+    let pg = sqlparser::dialect::PostgreSqlDialect {};
+
+    assert_eq!(
+        move_locking_after_limit("SELECT id FROM t ORDER BY id FOR UPDATE OF t SKIP LOCKED LIMIT $1;", &pg).as_deref(),
+        Some("SELECT id FROM t ORDER BY id LIMIT $1 FOR UPDATE OF t SKIP LOCKED;")
+    );
+    assert_eq!(
+        move_locking_after_limit("SELECT id FROM t FOR NO KEY UPDATE NOWAIT OFFSET 5 LIMIT 2", &pg).as_deref(),
+        Some("SELECT id FROM t OFFSET 5 LIMIT 2 FOR NO KEY UPDATE NOWAIT")
+    );
+    // A LIMIT inside a subquery or text inside a string literal is not a clause.
+    assert_eq!(
+        move_locking_after_limit("SELECT (SELECT 1 LIMIT 1) FROM t WHERE note = 'FOR UPDATE LIMIT' FOR UPDATE", &pg),
+        None
+    );
+    // Already in sqlparser's order: nothing to move.
+    assert_eq!(move_locking_after_limit("SELECT id FROM t LIMIT 1 FOR UPDATE", &pg), None);
+}
+
+#[test]
 fn sqlite_current_time_keywords_are_text() {
     let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(

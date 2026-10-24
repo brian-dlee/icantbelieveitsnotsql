@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 
 use sqlparser::ast::Statement;
-use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser as SqlParser;
 
 use crate::analyze::{analyze_statement, analyze_view_columns, Param, StatementKind};
@@ -80,8 +79,21 @@ fn clean_parser_error(message: &str) -> String {
         .to_string()
 }
 
-fn parse_single_statement(dialect: &dyn Dialect, sql: &str) -> Result<Statement, (String, usize)> {
-    match SqlParser::parse_sql(dialect, sql) {
+fn parse_single_statement(dialect: SqlDialect, sql: &str) -> Result<Statement, (String, usize)> {
+    let parser_dialect = dialect.parser_dialect();
+    let result = SqlParser::parse_sql(parser_dialect.as_ref(), sql);
+    // PostgreSQL allows `FOR UPDATE ... SKIP LOCKED` before `LIMIT`; retry with
+    // the clauses in the order sqlparser expects. The original text is kept.
+    let result = match result {
+        Err(err) if dialect == SqlDialect::PostgreSQL => {
+            match crate::paramstyle::move_locking_after_limit(sql, parser_dialect.as_ref()) {
+                Some(reordered) => SqlParser::parse_sql(parser_dialect.as_ref(), &reordered).map_err(|_| err),
+                None => Err(err),
+            }
+        }
+        other => other,
+    };
+    match result {
         Ok(mut statements) => match statements.len() {
             1 => Ok(statements.remove(0)),
             0 => Err((String::from("statement is empty"), 1)),
@@ -206,7 +218,7 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
             let mut block_ok = true;
 
             for raw in &block.statements {
-                match parse_single_statement(parser_dialect.as_ref(), &raw.sql) {
+                match parse_single_statement(dialect, &raw.sql) {
                     Ok(statement) => {
                         match &statement {
                             Statement::CreateTable(create_table) => schema.add_create_table(create_table),

@@ -40,3 +40,10 @@ SELECT id, name FROM widgets WHERE id IN (:ids) AND name NOT IN (:excluded) ORDE
 -- name: widgets_in_array :many
 -- param: ids list[int]
 SELECT id FROM widgets WHERE id = ANY(:ids);
+
+-- PostgreSQL accepts a locking clause before LIMIT; the SQL is emitted as written.
+-- name: claim_widgets :many
+SELECT id, name FROM widgets
+ORDER BY id
+FOR UPDATE SKIP LOCKED
+LIMIT :batch_size;
