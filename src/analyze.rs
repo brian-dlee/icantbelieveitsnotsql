@@ -356,6 +356,16 @@ pub fn analyze_view_columns(query: &Query, schema: &Schema, dialect: SqlDialect)
 }
 
 impl<'s> Analyzer<'s> {
+    /// Runs `analyze` with the "unaliased expression" warning active again,
+    /// for nested queries whose column names are used (derived tables and
+    /// CTEs without a column list) inside a quiet context.
+    fn loudly<T>(&mut self, analyze: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+        let saved = std::mem::replace(&mut self.unnamed_depth, 0);
+        let result = analyze(self);
+        self.unnamed_depth = saved;
+        result
+    }
+
     /// Runs `analyze` with the "unaliased expression" warning silenced.
     fn quietly<T>(&mut self, analyze: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
         self.unnamed_depth += 1;
@@ -581,12 +591,11 @@ impl<'s> Analyzer<'s> {
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
                 let name = cte.alias.name.value.clone();
-                // `name(a, b) AS (...)` names the columns itself. An error
+                // `name(a, b) AS (...)` names the columns itself; otherwise the
+                // body's names are used even inside a quiet context. An error
                 // abandons the whole analysis, so the counter needs no reset then.
-                let named_by_alias = !cte.alias.columns.is_empty();
-                if named_by_alias {
-                    self.unnamed_depth += 1;
-                }
+                let saved_depth = self.unnamed_depth;
+                self.unnamed_depth = if cte.alias.columns.is_empty() { 0 } else { saved_depth + 1 };
                 let anchor = match cte.query.body.as_ref() {
                     SetExpr::SetOperation { left, .. } if with.recursive => Some(left),
                     _ => None,
@@ -595,11 +604,15 @@ impl<'s> Analyzer<'s> {
                 let columns = if let Some(anchor) = anchor {
                     // A recursive CTE refers to itself: type it from the anchor
                     // arm, then re-analyze the whole body against that until the
-                    // recursive arm stops widening it. Only the last pass keeps
-                    // its parameters and warnings.
+                    // recursive arm stops widening it. Widening can cascade
+                    // (`b + a` widens after `a` does), but each column only
+                    // widens a few times, so one pass per column plus two
+                    // always settles. Only the last pass keeps its parameters
+                    // and warnings.
                     let (params_mark, warnings_mark) = (self.params.len(), self.warnings.len());
                     let mut columns = self.analyze_set_expr(anchor, &cte_scope, None)?;
-                    for pass in 0..2 {
+                    let max_passes = columns.len() + 2;
+                    for pass in 0..max_passes {
                         self.params.truncate(params_mark);
                         self.warnings.truncate(warnings_mark);
                         apply_alias_columns(&mut columns, &cte.alias);
@@ -614,7 +627,7 @@ impl<'s> Analyzer<'s> {
                         let next = self.analyze_query(&cte.query, Some(&recursive_scope))?;
                         let settled = next.len() == columns.len()
                             && next.iter().zip(&columns).all(|(a, b)| a.type_info == b.type_info);
-                        if pass == 1 || settled {
+                        if settled || pass + 1 == max_passes {
                             columns = next;
                             break;
                         }
@@ -625,9 +638,7 @@ impl<'s> Analyzer<'s> {
                     self.analyze_query(&cte.query, Some(&cte_scope))?
                 };
 
-                if named_by_alias {
-                    self.unnamed_depth -= 1;
-                }
+                self.unnamed_depth = saved_depth;
                 let mut columns = columns;
                 apply_alias_columns(&mut columns, &cte.alias);
                 cte_scope.ctes.push(Table { name, columns });
@@ -972,7 +983,7 @@ impl<'s> Analyzer<'s> {
                 let mut columns = if named_by_alias {
                     self.quietly(|a| a.analyze_query(subquery, Some(&*scope)))?
                 } else {
-                    self.analyze_query(subquery, Some(&*scope))?
+                    self.loudly(|a| a.analyze_query(subquery, Some(&*scope)))?
                 };
                 let name = alias
                     .as_ref()

@@ -396,6 +396,29 @@ fn recursive_cte_resolves_its_own_name_once() {
 }
 
 #[test]
+fn recursive_cte_widening_cascades_until_settled() {
+    let analysis = ok("
+        WITH RECURSIVE c(a, b, d) AS (
+            SELECT 1, 1, 1
+            UNION ALL
+            SELECT a + 0.5, b + a, d + b FROM c WHERE a < 3
+        )
+        SELECT a, b, d FROM c");
+    let types: Vec<SqlType> = analysis.columns.iter().map(|c| c.type_info.sql_type).collect();
+    assert_eq!(types, vec![SqlType::Float, SqlType::Float, SqlType::Float]);
+}
+
+#[test]
+fn derived_table_names_still_warn_inside_exists() {
+    let analysis = ok("SELECT id FROM users WHERE EXISTS (SELECT d.column_1 FROM (SELECT 1 + 2) AS d)");
+    assert!(
+        analysis.warnings.iter().any(|w| w.contains("unaliased expression `1 + 2`")),
+        "{:?}",
+        analysis.warnings
+    );
+}
+
+#[test]
 fn sqlite_current_time_keywords_are_text() {
     let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(
