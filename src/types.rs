@@ -37,6 +37,12 @@ impl SqlType {
             return SqlType::Interval;
         }
 
+        // MySQL's boolean convention (BOOL is an alias for TINYINT(1)); wider
+        // TINYINTs hold small numbers.
+        if base == "TINYINT" && upper[base.len()..].trim_start().starts_with("(1)") {
+            return SqlType::Bool;
+        }
+
         match base.as_str() {
             "BOOL" | "BOOLEAN" => return SqlType::Bool,
             "SERIAL" | "SMALLSERIAL" | "BIGSERIAL" => return SqlType::Int,
