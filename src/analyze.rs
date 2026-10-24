@@ -1492,14 +1492,23 @@ impl<'s> Analyzer<'s> {
             )),
             // `ARRAY[a, b]`: an array of the elements' unified type.
             Expr::Array(array) => {
+                // Settle the element type from the non-placeholder elements
+                // first, so a leading placeholder (`ARRAY[$1, 1]`) gets it too.
+                // Parameters are ordered by position, so the walk order is free.
                 let mut element: Option<Column> = None;
-                for item in &array.elem {
-                    let expected = element.clone();
-                    let column = self.walk_expr(item, expected.as_ref(), None, scope)?;
+                for item in array.elem.iter().filter(|item| !is_placeholder(item)) {
+                    let column = self.walk_expr(item, element.as_ref(), None, scope)?;
                     element = Some(match element {
                         Some(previous) => unify_columns(&previous, &column),
                         None => column,
                     });
+                }
+                for item in array.elem.iter().filter(|item| is_placeholder(item)) {
+                    let expected = element.clone().map(|e| comparison_target(&e));
+                    let column = self.walk_expr(item, expected.as_ref(), None, scope)?;
+                    if element.is_none() {
+                        element = Some(column);
+                    }
                 }
                 let element_type = element.as_ref().and_then(|e| {
                     e.type_info
@@ -1935,7 +1944,13 @@ fn postgresql_function_result(name: &str, args: &[Column]) -> Option<Column> {
         // json[b]_object take text arrays and are strict.
         "json_object" | "jsonb_object" | "to_json" | "to_jsonb" | "row_to_json" | "array_to_json"
         | "jsonb_set" | "jsonb_insert"
-        | "jsonb_strip_nulls" | "json_strip_nulls" | "jsonb_set_lax" => anonymous(Json, any_nullable),
+        | "jsonb_strip_nulls" | "json_strip_nulls" => anonymous(Json, any_nullable),
+        // NULL only from target, path or create_if_missing; a NULL new_value is
+        // handled by null_value_treatment.
+        "jsonb_set_lax" => anonymous(
+            Json,
+            [0, 1, 3].iter().any(|&i| args.get(i).is_some_and(|a| a.type_info.nullable)),
+        ),
         // Aggregates over no rows return NULL.
         "json_agg" | "jsonb_agg" | "json_object_agg" | "jsonb_object_agg" => anonymous(Json, true),
         "array_agg" => {

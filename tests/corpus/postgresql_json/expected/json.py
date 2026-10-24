@@ -111,3 +111,38 @@ async def concat_kinds(
 ) -> list[ConcatKindsRow]:
     """Runs `concat_kinds`."""
     return [ConcatKindsRow.model_validate(_row_dict(ConcatKindsRow, row)) for row in await connection.fetch(CONCAT_KINDS)]
+
+
+# ---- array_and_lax (:many) ----
+
+
+class ArrayAndLaxRow(pydantic.BaseModel):
+    """One result row of `array_and_lax`."""
+
+    pair: list[int | None]
+    lax: typing.Any
+
+
+class ArrayAndLaxParams(pydantic.BaseModel):
+    """Parameters of `array_and_lax`."""
+
+    id: int
+
+
+ARRAY_AND_LAX = """
+SELECT
+    ARRAY[$1, id] AS pair,
+    jsonb_set_lax('{}'::jsonb, '{k}', meta) AS lax
+FROM items
+ORDER BY id
+"""
+
+
+async def array_and_lax(
+    connection: asyncpg.Connection | asyncpg.Pool,
+    *,
+    id: int,
+) -> list[ArrayAndLaxRow]:
+    """Runs `array_and_lax`."""
+    params = tuple(ArrayAndLaxParams(id=id).model_dump(by_alias=True).values())
+    return [ArrayAndLaxRow.model_validate(_row_dict(ArrayAndLaxRow, row)) for row in await connection.fetch(ARRAY_AND_LAX, *params)]

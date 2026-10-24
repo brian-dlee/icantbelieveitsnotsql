@@ -31,3 +31,12 @@ SELECT
     jsonb_object(ARRAY['a', label]) AS from_pairs
 FROM items
 ORDER BY id;
+
+-- A leading placeholder in ARRAY[...] takes the other elements' type, and
+-- jsonb_set_lax is NULL only for a NULL target, path or create_if_missing.
+-- name: array_and_lax :many
+SELECT
+    ARRAY[$1, id] AS pair,
+    jsonb_set_lax('{}'::jsonb, '{k}', meta) AS lax
+FROM items
+ORDER BY id;
