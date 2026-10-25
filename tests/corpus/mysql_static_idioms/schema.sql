@@ -1,0 +1,8 @@
+CREATE TABLE listings (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    storeId INT NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    price DOUBLE NOT NULL,
+    state TINYINT(4) NOT NULL DEFAULT 0,
+    closesAt DATETIME NOT NULL
+);

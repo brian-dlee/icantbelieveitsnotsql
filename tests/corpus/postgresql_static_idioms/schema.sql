@@ -1,0 +1,8 @@
+CREATE TABLE listings (
+    id BIGSERIAL PRIMARY KEY,
+    store_id BIGINT NOT NULL,
+    title TEXT NOT NULL,
+    price DOUBLE PRECISION NOT NULL,
+    state SMALLINT NOT NULL DEFAULT 0,
+    closes_at TIMESTAMPTZ NOT NULL
+);
