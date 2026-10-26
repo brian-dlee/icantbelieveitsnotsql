@@ -543,6 +543,15 @@ fn locking_clause_moves_after_limit_for_parsing() {
         move_locking_after_limit("SELECT id FROM t FOR UPDATE LIMIT 1 -- note\n;", &pg).as_deref(),
         Some("SELECT id FROM t LIMIT 1 FOR UPDATE -- note\n;")
     );
+    // A line comment between the clause and LIMIT keeps its newline.
+    assert_eq!(
+        move_locking_after_limit(
+            "SELECT id FROM t FOR UPDATE -- lock\nLIMIT 1;\nSELECT id FROM t;",
+            &pg
+        )
+        .as_deref(),
+        Some("SELECT id FROM t -- lock\nLIMIT 1 FOR UPDATE;\nSELECT id FROM t;")
+    );
     // Each statement of a file moves on its own; a `FOR UPDATE` in one never
     // pairs with a `LIMIT` in the next.
     assert_eq!(

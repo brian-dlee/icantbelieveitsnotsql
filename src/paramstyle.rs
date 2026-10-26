@@ -236,11 +236,12 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
     line_starts.extend(sql.match_indices('\n').map(|(i, _)| i + 1));
     let offset = |location: Location| byte_offset(sql, &line_starts, location);
 
-    // (lock clause start, LIMIT/OFFSET start, end of the statement's last token)
+    // (lock clause start, end of its last token, end of the statement's last
+    // token). LIMIT/OFFSET lies between the last two.
     let mut moves: Vec<(usize, usize, usize)> = Vec::new();
     let mut depth = 0usize;
     let mut lock_start: Option<usize> = None;
-    let mut limit_start: Option<usize> = None;
+    let mut lock_end: Option<usize> = None;
     // Ends before trailing whitespace and comments, so a moved clause is never
     // placed inside a trailing `-- comment`.
     let mut last_token_end = 0usize;
@@ -250,11 +251,11 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
             Token::LParen => depth += 1,
             Token::RParen => depth = depth.saturating_sub(1),
             Token::SemiColon if depth == 0 => {
-                if let (Some(lock), Some(limit)) = (lock_start, limit_start) {
-                    moves.push((lock, limit, last_token_end));
+                if let (Some(lock), Some(lock_end)) = (lock_start, lock_end) {
+                    moves.push((lock, lock_end, last_token_end));
                 }
                 lock_start = None;
-                limit_start = None;
+                lock_end = None;
             }
             Token::Word(w) if depth == 0 => {
                 if lock_start.is_none() && w.keyword == Keyword::FOR {
@@ -267,18 +268,18 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
                         lock_start = Some(offset(token.span.start));
                     }
                 } else if lock_start.is_some()
-                    && limit_start.is_none()
+                    && lock_end.is_none()
                     && matches!(w.keyword, Keyword::LIMIT | Keyword::OFFSET)
                 {
-                    limit_start = Some(offset(token.span.start));
+                    lock_end = Some(last_token_end);
                 }
             }
             _ => {}
         }
         last_token_end = offset(token.span.end);
     }
-    if let (Some(lock), Some(limit)) = (lock_start, limit_start) {
-        moves.push((lock, limit, last_token_end));
+    if let (Some(lock), Some(lock_end)) = (lock_start, lock_end) {
+        moves.push((lock, lock_end, last_token_end));
     }
     if moves.is_empty() {
         return None;
@@ -286,11 +287,13 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
 
     let mut out = String::with_capacity(sql.len() + moves.len());
     let mut cursor = 0;
-    for (lock, limit, end) in moves {
+    for (lock, lock_end, end) in moves {
+        // Whitespace and comments between the clause and LIMIT stay in place,
+        // so a line comment there keeps the newline that ends it.
         out.push_str(&sql[cursor..lock]);
-        out.push_str(&sql[limit..end]);
+        out.push_str(sql[lock_end..end].trim_start());
         out.push(' ');
-        out.push_str(sql[lock..limit].trim_end());
+        out.push_str(&sql[lock..lock_end]);
         cursor = end;
     }
     out.push_str(&sql[cursor..]);
