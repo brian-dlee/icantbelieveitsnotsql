@@ -74,9 +74,7 @@ fn extract_parser_error_line(message: &str) -> Option<usize> {
 }
 
 fn clean_parser_error(message: &str) -> String {
-    message
-        .trim_start_matches("sql parser error: ")
-        .to_string()
+    message.trim_start_matches("sql parser error: ").to_string()
 }
 
 /// Rewrites source text where sqlparser and the database disagree on lexing.
@@ -95,7 +93,9 @@ fn parse_single_statement(dialect: SqlDialect, sql: &str) -> Result<Statement, (
     let result = match result {
         Err(err) if dialect == SqlDialect::PostgreSQL => {
             match crate::paramstyle::move_locking_after_limit(sql, parser_dialect.as_ref()) {
-                Some(reordered) => SqlParser::parse_sql(parser_dialect.as_ref(), &reordered).map_err(|_| err),
+                Some(reordered) => {
+                    SqlParser::parse_sql(parser_dialect.as_ref(), &reordered).map_err(|_| err)
+                }
                 None => Err(err),
             }
         }
@@ -118,9 +118,20 @@ fn parse_single_statement(dialect: SqlDialect, sql: &str) -> Result<Statement, (
 fn sanitize_stem(stem: &str) -> String {
     let mut out: String = stem
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+    if out
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(true)
+    {
         out = format!("_{}", out);
     }
     out.to_lowercase()
@@ -141,8 +152,10 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
     })?;
     let python_config = &python_config;
 
-    let driver = python::Driver::resolve(python_config.driver.as_deref(), dialect)
-        .map_err(|message| ButterError::Config(format!("{}: {}", config_path.display(), message)))?;
+    let driver =
+        python::Driver::resolve(python_config.driver.as_deref(), dialect).map_err(|message| {
+            ButterError::Config(format!("{}: {}", config_path.display(), message))
+        })?;
 
     let mut errors: Vec<Diagnostic> = Vec::new();
     let mut warnings: Vec<Diagnostic> = Vec::new();
@@ -155,7 +168,11 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
         let contents = match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(err) => {
-                errors.push(Diagnostic::new(&schema_file, 0, format!("cannot read schema file: {}", err)));
+                errors.push(Diagnostic::new(
+                    &schema_file,
+                    0,
+                    format!("cannot read schema file: {}", err),
+                ));
                 continue;
             }
         };
@@ -165,8 +182,12 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
             Ok(statements) => {
                 for statement in statements {
                     match &statement {
-                        Statement::CreateTable(create_table) => schema.add_create_table(create_table),
-                        Statement::CreateView { .. } => views.push((schema_file.clone(), 0, statement.clone())),
+                        Statement::CreateTable(create_table) => {
+                            schema.add_create_table(create_table)
+                        }
+                        Statement::CreateView { .. } => {
+                            views.push((schema_file.clone(), 0, statement.clone()))
+                        }
                         _ => {}
                     }
                 }
@@ -174,7 +195,11 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
             Err(err) => {
                 let message = err.to_string();
                 let line = extract_parser_error_line(&message).unwrap_or(0);
-                errors.push(Diagnostic::new(&schema_file, line, clean_parser_error(&message)));
+                errors.push(Diagnostic::new(
+                    &schema_file,
+                    line,
+                    clean_parser_error(&message),
+                ));
             }
         }
     }
@@ -207,7 +232,11 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             Err(err) => {
-                errors.push(Diagnostic::new(&relative_path, 0, format!("cannot read: {}", err)));
+                errors.push(Diagnostic::new(
+                    &relative_path,
+                    0,
+                    format!("cannot read: {}", err),
+                ));
                 continue;
             }
         };
@@ -231,7 +260,9 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
                 match parse_single_statement(dialect, &raw.sql) {
                     Ok(statement) => {
                         match &statement {
-                            Statement::CreateTable(create_table) => schema.add_create_table(create_table),
+                            Statement::CreateTable(create_table) => {
+                                schema.add_create_table(create_table)
+                            }
                             Statement::CreateView { .. } => {
                                 views.push((relative_path.clone(), raw.line, statement.clone()))
                             }
@@ -283,7 +314,13 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
 
     // Views need every table first, so they are resolved after the file pass.
     for (path, line, statement) in &views {
-        if let Statement::CreateView { name, columns, query, .. } = statement {
+        if let Statement::CreateView {
+            name,
+            columns,
+            query,
+            ..
+        } = statement
+        {
             match analyze_view_columns(query, &schema, dialect) {
                 Ok(mut view_columns) => {
                     for (column, def) in view_columns.iter_mut().zip(columns.iter()) {
@@ -294,7 +331,9 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
                         columns: view_columns,
                     });
                 }
-                Err(message) => errors.push(Diagnostic::new(path, *line, format!("view: {}", message))),
+                Err(message) => {
+                    errors.push(Diagnostic::new(path, *line, format!("view: {}", message)))
+                }
             }
         }
     }
@@ -309,7 +348,9 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
         for parsed in &file.blocks {
             let block = &parsed.block;
             let Some(name) = &block.name else { continue };
-            let Some(command) = block.command else { continue };
+            let Some(command) = block.command else {
+                continue;
+            };
 
             if seen_names.iter().any(|n| n == name) {
                 errors.push(Diagnostic::new(
@@ -364,9 +405,10 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
     let mut rendered: Vec<(PathBuf, String)> = Vec::new();
 
     for module in &modules {
-        let code = python::render_module(module, python_config, dialect, driver).map_err(|message| {
-            ButterError::Diagnostics(vec![Diagnostic::new(&module.source, 0, message)])
-        })?;
+        let code =
+            python::render_module(module, python_config, dialect, driver).map_err(|message| {
+                ButterError::Diagnostics(vec![Diagnostic::new(&module.source, 0, message)])
+            })?;
         let output_path = output_dir.join(format!("{}.py", module.stem));
         outputs.push((output_path.clone(), module.units.len()));
         rendered.push((output_path, code));
@@ -451,20 +493,31 @@ fn build_unit(
         let analysis = match analyze_statement(statement, schema, dialect) {
             Ok(analysis) => analysis,
             Err(message) => {
-                errors.push(Diagnostic::new(path, raw.line, format!("{}: {}", name, message)));
+                errors.push(Diagnostic::new(
+                    path,
+                    raw.line,
+                    format!("{}: {}", name, message),
+                ));
                 continue;
             }
         };
 
         for warning in &analysis.warnings {
-            warnings.push(Diagnostic::new(path, raw.line, format!("{}: {}", name, warning)));
+            warnings.push(Diagnostic::new(
+                path,
+                raw.line,
+                format!("{}: {}", name, warning),
+            ));
         }
 
         if statements.len() > 1 && analysis.positional {
             errors.push(Diagnostic::new(
                 path,
                 raw.line,
-                format!("{}: multi-statement queries must use named placeholders (`:name`), not `?`", name),
+                format!(
+                    "{}: multi-statement queries must use named placeholders (`:name`), not `?`",
+                    name
+                ),
             ));
         }
 
@@ -474,7 +527,9 @@ fn build_unit(
         for param in analysis.params {
             match params.iter_mut().find(|p| p.name == param.name) {
                 Some(existing) => {
-                    if existing.type_info.sql_type == SqlType::Any && param.type_info.sql_type != SqlType::Any {
+                    if existing.type_info.sql_type == SqlType::Any
+                        && param.type_info.sql_type != SqlType::Any
+                    {
                         existing.type_info = param.type_info.clone();
                         existing.source = param.source.clone();
                     }
@@ -515,12 +570,17 @@ fn build_unit(
         errors.push(Diagnostic::new(
             path,
             block.line,
-            format!("query `{}` is declared `:execmany` but has no parameters", name),
+            format!(
+                "query `{}` is declared `:execmany` but has no parameters",
+                name
+            ),
         ));
     }
 
     if command == Command::ExecLastId
-        && !unit_statements.iter().any(|s| s.kind == StatementKind::Insert)
+        && !unit_statements
+            .iter()
+            .any(|s| s.kind == StatementKind::Insert)
     {
         warnings.push(Diagnostic::new(
             path,
@@ -541,7 +601,11 @@ fn build_unit(
                     if params.is_empty() {
                         String::from("(none)")
                     } else {
-                        params.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ")
+                        params
+                            .iter()
+                            .map(|p| p.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     }
                 ),
             ));
@@ -549,7 +613,10 @@ fn build_unit(
     }
 
     for (column_name, _) in &block.column_types {
-        if !columns.iter().any(|c| c.name.eq_ignore_ascii_case(column_name)) {
+        if !columns
+            .iter()
+            .any(|c| c.name.eq_ignore_ascii_case(column_name))
+        {
             errors.push(Diagnostic::new(
                 path,
                 block.line,
@@ -560,7 +627,11 @@ fn build_unit(
                     if columns.is_empty() {
                         String::from("(none)")
                     } else {
-                        columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ")
+                        columns
+                            .iter()
+                            .map(|c| c.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     }
                 ),
             ));

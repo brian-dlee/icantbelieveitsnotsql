@@ -20,7 +20,17 @@ const PYTHON_KEYWORDS: &[&str] = &[
 ];
 
 /// Names the generated function bodies use for their own locals.
-const RESERVED_PARAM_NAMES: &[&str] = &["cursor", "connection", "rows", "row", "params", "sql", "query_params", "self", "cls"];
+const RESERVED_PARAM_NAMES: &[&str] = &[
+    "cursor",
+    "connection",
+    "rows",
+    "row",
+    "params",
+    "sql",
+    "query_params",
+    "self",
+    "cls",
+];
 
 /// The database driver the generated functions call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,8 +137,19 @@ impl Driver {
 }
 
 const STDLIB_MODULES: &[&str] = &[
-    "abc", "collections", "dataclasses", "datetime", "decimal", "enum", "functools", "ipaddress",
-    "json", "pathlib", "re", "typing", "uuid",
+    "abc",
+    "collections",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "enum",
+    "functools",
+    "ipaddress",
+    "json",
+    "pathlib",
+    "re",
+    "typing",
+    "uuid",
 ];
 
 pub fn render_init() -> String {
@@ -161,13 +182,24 @@ fn is_python_identifier(name: &str) -> bool {
 fn python_field_name(name: &str, reserved: &[&str]) -> String {
     let mut out: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
 
     if out.is_empty() {
         out = String::from("field");
     }
-    if out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if out
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         out = format!("_{}", out);
     }
     if PYTHON_KEYWORDS.contains(&out.as_str()) || reserved.contains(&out.as_str()) {
@@ -193,7 +225,11 @@ impl<'c> TypeResolver<'c> {
     fn new(config: &'c PythonConfig, driver: Driver) -> TypeResolver<'c> {
         let mut imports = BTreeSet::new();
         imports.insert(String::from(driver.import()));
-        TypeResolver { config, driver, imports }
+        TypeResolver {
+            config,
+            driver,
+            imports,
+        }
     }
 
     /// Records `import x.y` for every dotted name in a user-written type.
@@ -201,7 +237,11 @@ impl<'c> TypeResolver<'c> {
         let mut token = String::new();
         let flush = |token: &mut String, imports: &mut BTreeSet<String>| {
             if let Some((module, _)) = token.rsplit_once('.') {
-                if !module.is_empty() && module.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+                if !module.is_empty()
+                    && module
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                {
                     imports.insert(module.to_string());
                 }
             }
@@ -218,7 +258,10 @@ impl<'c> TypeResolver<'c> {
         flush(&mut token, &mut self.imports);
     }
 
-    fn lookup_override(map: &std::collections::BTreeMap<String, String>, key: &str) -> Option<String> {
+    fn lookup_override(
+        map: &std::collections::BTreeMap<String, String>,
+        key: &str,
+    ) -> Option<String> {
         map.iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v.clone())
@@ -266,7 +309,12 @@ impl<'c> TypeResolver<'c> {
 
         if base.is_none() {
             if let Some(declared) = &type_info.declared {
-                let key = declared.split('(').next().unwrap_or("").trim().to_uppercase();
+                let key = declared
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_uppercase();
                 base = Self::lookup_override(&self.config.sql_types, &key);
             }
         }
@@ -309,10 +357,13 @@ impl<'c> TypeResolver<'c> {
     /// The default Python type, adjusted for what the driver actually
     /// sends and returns.
     fn driver_type(&mut self, type_info: &TypeInfo, is_param: bool) -> String {
-        let declared_base = type_info
-            .declared
-            .as_deref()
-            .map(|d| d.split(['(', '[']).next().unwrap_or("").trim().to_uppercase());
+        let declared_base = type_info.declared.as_deref().map(|d| {
+            d.split(['(', '['])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_uppercase()
+        });
 
         // asyncpg decodes UUID columns to uuid.UUID.
         if self.driver == Driver::Asyncpg && declared_base.as_deref() == Some("UUID") {
@@ -322,7 +373,9 @@ impl<'c> TypeResolver<'c> {
 
         // PyMySQL and aiomysql return MySQL TIME values (which may exceed
         // 24 hours) as datetime.timedelta.
-        if matches!(self.driver, Driver::Pymysql | Driver::Aiomysql) && type_info.sql_type == SqlType::Time {
+        if matches!(self.driver, Driver::Pymysql | Driver::Aiomysql)
+            && type_info.sql_type == SqlType::Time
+        {
             self.imports.insert(String::from("datetime"));
             return String::from("datetime.timedelta");
         }
@@ -384,7 +437,8 @@ fn param_fields(unit: &QueryUnit, resolver: &mut TypeResolver) -> Vec<FieldSpec>
                 .iter()
                 .find(|(n, _)| n == &param.name)
                 .map(|(_, t)| t.as_str());
-            let type_expr = resolver.resolve(&param.type_info, param.source.as_ref(), explicit, true);
+            let type_expr =
+                resolver.resolve(&param.type_info, param.source.as_ref(), explicit, true);
 
             let mut python_name = python_field_name(&param.name, RESERVED_PARAM_NAMES);
             while used.contains(&python_name) {
@@ -412,7 +466,8 @@ fn column_fields(unit: &QueryUnit, resolver: &mut TypeResolver) -> Vec<FieldSpec
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(&column.name))
                 .map(|(_, t)| t.as_str());
-            let type_expr = resolver.resolve(&column.type_info, column.source.as_ref(), explicit, false);
+            let type_expr =
+                resolver.resolve(&column.type_info, column.source.as_ref(), explicit, false);
 
             let mut python_name = python_field_name(&column.name, &[]);
             while used.contains(&python_name) {
@@ -430,7 +485,13 @@ fn column_fields(unit: &QueryUnit, resolver: &mut TypeResolver) -> Vec<FieldSpec
         .collect()
 }
 
-fn render_model(out: &mut String, class_name: &str, fields: &[FieldSpec], doc: &str, is_params: bool) {
+fn render_model(
+    out: &mut String,
+    class_name: &str,
+    fields: &[FieldSpec],
+    doc: &str,
+    is_params: bool,
+) {
     out.push_str(&format!("class {}(pydantic.BaseModel):\n", class_name));
     out.push_str(&format!("    \"\"\"{}\"\"\"\n\n", doc));
 
@@ -496,7 +557,10 @@ fn render_sql_constants(
     let lists = list_params(unit);
     if !lists.is_empty() {
         if unit.command == Command::ExecMany {
-            return Err(format!("query `{}`: `:execmany` cannot take list parameters", unit.name));
+            return Err(format!(
+                "query `{}`: `:execmany` cannot take list parameters",
+                unit.name
+            ));
         }
         if unit.positional && driver != Driver::Asyncpg {
             return Err(format!(
@@ -572,7 +636,11 @@ fn render_function(
     let wait = driver.wait();
 
     // Signature.
-    let def = if driver.is_async() { "async def" } else { "def" };
+    let def = if driver.is_async() {
+        "async def"
+    } else {
+        "def"
+    };
     out.push_str(&format!("{} {}(\n", def, unit.name));
     out.push_str(&format!("    {},\n", driver.handle(unit.statements.len())));
 
@@ -582,7 +650,10 @@ fn render_function(
         out.push_str("    *,\n");
         for field in fields {
             let default = if field.nullable { " = None" } else { "" };
-            out.push_str(&format!("    {}: {}{},\n", field.python_name, field.type_expr, default));
+            out.push_str(&format!(
+                "    {}: {}{},\n",
+                field.python_name, field.type_expr, default
+            ));
         }
     }
     out.push_str(&format!(") -> {}:\n", return_type));
@@ -593,7 +664,10 @@ fn render_function(
         doc_lines.push(format!("Runs `{}`.", unit.name));
     }
     if doc_lines.len() == 1 {
-        out.push_str(&format!("    \"\"\"{}\"\"\"\n", doc_lines[0].replace("\"\"\"", "'''")));
+        out.push_str(&format!(
+            "    \"\"\"{}\"\"\"\n",
+            doc_lines[0].replace("\"\"\"", "'''")
+        ));
     } else {
         out.push_str("    \"\"\"\n");
         for line in &doc_lines {
@@ -661,7 +735,10 @@ fn render_function(
         let args = if has_params { ", *params" } else { "" };
         match unit.command {
             Command::One => {
-                out.push_str(&format!("    row = await connection.fetchrow({}{})\n", constant, args));
+                out.push_str(&format!(
+                    "    row = await connection.fetchrow({}{})\n",
+                    constant, args
+                ));
                 out.push_str(&format!(
                     "    return {}.model_validate(_row_dict({}, row)) if row is not None else None\n",
                     row_class, row_class
@@ -715,7 +792,11 @@ fn render_function(
                 sql_constant_name(unit, index)
             ));
         } else {
-            out.push_str(&format!("    {}cursor.execute({})\n", wait, sql_constant_name(unit, index)));
+            out.push_str(&format!(
+                "    {}cursor.execute({})\n",
+                wait,
+                sql_constant_name(unit, index)
+            ));
         }
     }
 
@@ -748,13 +829,10 @@ pub fn render_module(
     driver: Driver,
 ) -> Result<String, String> {
     let mut resolver = TypeResolver::new(config, driver);
-    let first_party_root: Option<String> = config
-        .output_dir
-        .components()
-        .find_map(|c| match c {
-            std::path::Component::Normal(part) => part.to_str().map(|s| s.to_string()),
-            _ => None,
-        });
+    let first_party_root: Option<String> = config.output_dir.components().find_map(|c| match c {
+        std::path::Component::Normal(part) => part.to_str().map(|s| s.to_string()),
+        _ => None,
+    });
     let mut body = String::new();
     let mut needs_list_helper = false;
     let needs_row_helper = module.units.iter().any(|u| u.command.returns_rows());
@@ -765,7 +843,10 @@ pub fn render_module(
 
     for unit in &module.units {
         if !is_python_identifier(&unit.name) || PYTHON_KEYWORDS.contains(&unit.name.as_str()) {
-            return Err(format!("query name `{}` is not a valid Python identifier", unit.name));
+            return Err(format!(
+                "query name `{}` is not a valid Python identifier",
+                unit.name
+            ));
         }
 
         let pascal = pascal_case(&unit.name);
@@ -815,7 +896,15 @@ pub fn render_module(
             needs_list_helper = true;
             resolver.imports.insert(String::from("typing"));
         }
-        render_function(&mut body, unit, &row_class, &params_class, &param_specs, driver, &expansions)?;
+        render_function(
+            &mut body,
+            unit,
+            &row_class,
+            &params_class,
+            &param_specs,
+            driver,
+            &expansions,
+        )?;
         body.push_str("\n\n");
     }
 
@@ -846,7 +935,8 @@ pub fn render_module(
         out.push('\n');
     }
 
-    let needs_tag_helper = driver == Driver::Asyncpg && module.units.iter().any(|u| u.command == Command::ExecRows);
+    let needs_tag_helper =
+        driver == Driver::Asyncpg && module.units.iter().any(|u| u.command == Command::ExecRows);
     if needs_tag_helper {
         out.push_str("\ndef _affected_rows(tag: str) -> int:\n");
         out.push_str("    \"\"\"Reads the row count from an asyncpg command tag such as `UPDATE 3` or `INSERT 0 2`.\"\"\"\n");
@@ -870,9 +960,13 @@ pub fn render_module(
         out.push_str("    \"\"\"Expands each list parameter into one placeholder per element.\n\n");
         out.push_str("    An empty list becomes an empty subquery, so `IN` matches nothing and `NOT IN` everything.\n");
         out.push_str("    \"\"\"\n");
-        out.push_str("    expanded = {key: value for key, value in params.items() if key not in names}\n");
+        out.push_str(
+            "    expanded = {key: value for key, value in params.items() if key not in names}\n",
+        );
         out.push_str("    for name in names:\n");
-        out.push_str("        keys = [f\"{name}__{index}\" for index in range(len(params[name]))]\n");
+        out.push_str(
+            "        keys = [f\"{name}__{index}\" for index in range(len(params[name]))]\n",
+        );
         out.push_str("        expanded.update(zip(keys, params[name], strict=True))\n");
         out.push_str(&format!(
             "        placeholders = \", \".join({} for key in keys)\n",

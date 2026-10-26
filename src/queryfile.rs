@@ -110,7 +110,7 @@ fn parse_header(line: &str) -> Option<(String, Option<Command>, String)> {
     let rest = trimmed.strip_prefix("--")?.trim_start();
 
     if let Some(rest) = rest.strip_prefix("name:") {
-        let mut parts = rest.trim().split_whitespace();
+        let mut parts = rest.split_whitespace();
         let name = parts.next()?.to_string();
         let command_text = parts.next().unwrap_or("").to_string();
         let command = Command::parse(&command_text);
@@ -322,7 +322,12 @@ fn split_statements(
     Ok(statements)
 }
 
-fn make_statement(segment: &str, text: &str, first_line: usize, segment_start: usize) -> Option<RawStatement> {
+fn make_statement(
+    segment: &str,
+    text: &str,
+    first_line: usize,
+    segment_start: usize,
+) -> Option<RawStatement> {
     // Drop leading blank lines and comment-only lines that would otherwise be
     // part of the statement; keep comments that sit between SQL lines.
     let mut kept: Vec<&str> = Vec::new();
@@ -354,7 +359,13 @@ fn make_statement(segment: &str, text: &str, first_line: usize, segment_start: u
 
     let sql = kept
         .iter()
-        .map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() })
+        .map(|l| {
+            if l.len() >= indent {
+                &l[indent..]
+            } else {
+                l.trim_start()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
         .trim_end()

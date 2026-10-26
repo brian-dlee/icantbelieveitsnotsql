@@ -28,7 +28,9 @@ pub fn list_token(style: ParamStyle, name: &str) -> String {
 
 /// Byte offset of a 1-based line/column (columns count characters).
 pub fn byte_offset(sql: &str, line_starts: &[usize], location: Location) -> usize {
-    let line_start = line_starts[(location.line as usize).saturating_sub(1).min(line_starts.len() - 1)];
+    let line_start = line_starts[(location.line as usize)
+        .saturating_sub(1)
+        .min(line_starts.len() - 1)];
     sql[line_start..]
         .char_indices()
         .nth((location.column as usize).saturating_sub(1))
@@ -42,7 +44,9 @@ fn is_numbered(text: &str) -> bool {
 
 /// Index of the nearest token before `index` that is not whitespace or a comment.
 fn previous_significant(tokens: &[TokenWithSpan], index: usize) -> Option<usize> {
-    (0..index).rev().find(|&i| !matches!(tokens[i].token, Token::Whitespace(_)))
+    (0..index)
+        .rev()
+        .find(|&i| !matches!(tokens[i].token, Token::Whitespace(_)))
 }
 
 /// Index of the nearest token after `index` that is not whitespace or a comment.
@@ -56,7 +60,11 @@ fn is_keyword(token: &Token, keyword: Keyword) -> bool {
 
 /// For a placeholder spanning tokens `first..=last`, the token indexes of an
 /// enclosing `[NOT] IN ( <placeholder> )`: `(in_or_not, open, close, negated)`.
-fn enclosing_in_list(tokens: &[TokenWithSpan], first: usize, last: usize) -> Option<(usize, usize, usize, bool)> {
+fn enclosing_in_list(
+    tokens: &[TokenWithSpan],
+    first: usize,
+    last: usize,
+) -> Option<(usize, usize, usize, bool)> {
     let open = previous_significant(tokens, first)?;
     let close = next_significant(tokens, last)?;
     if tokens[open].token != Token::LParen || tokens[close].token != Token::RParen {
@@ -67,7 +75,9 @@ fn enclosing_in_list(tokens: &[TokenWithSpan], first: usize, last: usize) -> Opt
         return None;
     }
     match previous_significant(tokens, in_index) {
-        Some(not_index) if is_keyword(&tokens[not_index].token, Keyword::NOT) => Some((not_index, open, close, true)),
+        Some(not_index) if is_keyword(&tokens[not_index].token, Keyword::NOT) => {
+            Some((not_index, open, close, true))
+        }
         _ => Some((in_index, open, close, false)),
     }
 }
@@ -117,11 +127,12 @@ pub fn rewrite(
         let text = match &token.token {
             Token::Placeholder(text) => text.clone(),
             Token::Colon | Token::AtSign => match tokens.get(index) {
-                Some(next)
-                    if matches!(&next.token, Token::Word(w) if params.iter().any(|p| p.name == w.value)) =>
+                Some(next) if matches!(&next.token, Token::Word(w) if params.iter().any(|p| p.name == w.value)) =>
                 {
                     index += 1;
-                    let Token::Word(word) = &next.token else { unreachable!() };
+                    let Token::Word(word) = &next.token else {
+                        unreachable!()
+                    };
                     format!("{}{}", token.token, word.value)
                 }
                 _ => continue,
@@ -193,10 +204,9 @@ pub fn rewrite(
                 }
                 (_, named) => {
                     let name = &named[1..];
-                    let position = params
-                        .iter()
-                        .position(|p| p.name == name)
-                        .ok_or_else(|| format!("placeholder `{}` has no matching parameter", named))?;
+                    let position = params.iter().position(|p| p.name == name).ok_or_else(|| {
+                        format!("placeholder `{}` has no matching parameter", named)
+                    })?;
                     match style {
                         ParamStyle::Pyformat => format!("%({})s", name),
                         _ => format!("${}", position + 1),
@@ -242,7 +252,9 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
                     {
                         lock_start = Some(offset(token.span.start));
                     }
-                } else if lock_start.is_some() && matches!(w.keyword, Keyword::LIMIT | Keyword::OFFSET) {
+                } else if lock_start.is_some()
+                    && matches!(w.keyword, Keyword::LIMIT | Keyword::OFFSET)
+                {
                     limit_start = Some(offset(token.span.start));
                     break;
                 }
@@ -278,7 +290,12 @@ pub fn normalize_mysql_dash_comments(sql: &str) -> String {
     let mut cursor = 0;
     let mut i = 0;
 
-    let skip_to_line_end = |from: usize| bytes[from..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |n| from + n);
+    let skip_to_line_end = |from: usize| {
+        bytes[from..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |n| from + n)
+    };
 
     while i < bytes.len() {
         match bytes[i] {
@@ -301,7 +318,9 @@ pub fn normalize_mysql_dash_comments(sql: &str) -> String {
                 }
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i = sql[i + 2..].find("*/").map_or(bytes.len(), |n| i + 2 + n + 2);
+                i = sql[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |n| i + 2 + n + 2);
             }
             b'#' => i = skip_to_line_end(i),
             b'-' if bytes.get(i + 1) == Some(&b'-') => {

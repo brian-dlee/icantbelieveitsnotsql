@@ -47,8 +47,13 @@ impl SqlType {
             "BOOL" | "BOOLEAN" => return SqlType::Bool,
             "SERIAL" | "SMALLSERIAL" | "BIGSERIAL" => return SqlType::Int,
             "DATE" => return SqlType::Date,
-            "TIME" | "TIMETZ" | "TIME WITH TIME ZONE" | "TIME WITHOUT TIME ZONE" => return SqlType::Time,
-            "DATETIME" | "TIMESTAMP" | "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE"
+            "TIME" | "TIMETZ" | "TIME WITH TIME ZONE" | "TIME WITHOUT TIME ZONE" => {
+                return SqlType::Time
+            }
+            "DATETIME"
+            | "TIMESTAMP"
+            | "TIMESTAMPTZ"
+            | "TIMESTAMP WITH TIME ZONE"
             | "TIMESTAMP WITHOUT TIME ZONE" => return SqlType::DateTime,
             "JSON" | "JSONB" => return SqlType::Json,
             // PostgreSQL UUIDs and MySQL ENUM/SET values are represented as
@@ -72,7 +77,10 @@ impl SqlType {
     }
 
     pub fn is_numeric(&self) -> bool {
-        matches!(self, SqlType::Int | SqlType::Float | SqlType::Numeric | SqlType::Bool)
+        matches!(
+            self,
+            SqlType::Int | SqlType::Float | SqlType::Numeric | SqlType::Bool
+        )
     }
 
     /// Combine two types that flow into the same slot (UNION, CASE, COALESCE).

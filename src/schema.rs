@@ -1,6 +1,8 @@
 //! Table definitions collected from `CREATE TABLE` / `CREATE VIEW` statements.
 
-use sqlparser::ast::{ColumnOption, CreateTable, Expr, ObjectName, ObjectNamePart, TableConstraint};
+use sqlparser::ast::{
+    ColumnOption, CreateTable, Expr, ObjectName, ObjectNamePart, TableConstraint,
+};
 
 use crate::types::{SqlType, TypeInfo};
 
@@ -44,11 +46,10 @@ pub struct Schema {
 /// Last identifier of a possibly qualified name (`main.users` -> `users`).
 pub fn object_name_last(name: &ObjectName) -> String {
     name.0
-        .iter()
-        .rev()
-        .find_map(|part| match part {
-            ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
-            ObjectNamePart::Function(f) => Some(f.name.value.clone()),
+        .last()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(ident) => ident.value.clone(),
+            ObjectNamePart::Function(f) => f.name.value.clone(),
         })
         .unwrap_or_default()
 }
@@ -61,7 +62,8 @@ impl Schema {
     }
 
     pub fn add_table(&mut self, table: Table) {
-        self.tables.retain(|t| !t.name.eq_ignore_ascii_case(&table.name));
+        self.tables
+            .retain(|t| !t.name.eq_ignore_ascii_case(&table.name));
         self.tables.push(table);
     }
 
