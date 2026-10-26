@@ -58,7 +58,11 @@ fn main() {
                 "dialect {}; {} table{} in schema: {}",
                 report.dialect.name(),
                 report.schema_tables.len(),
-                if report.schema_tables.len() == 1 { "" } else { "s" },
+                if report.schema_tables.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
                 if report.schema_tables.is_empty() {
                     String::from("(none)")
                 } else {
@@ -69,7 +73,11 @@ fn main() {
             for (path, count) in &report.outputs {
                 println!(
                     "{} {} ({} quer{})",
-                    if report.wrote_files { "wrote" } else { "checked" },
+                    if report.wrote_files {
+                        "wrote"
+                    } else {
+                        "checked"
+                    },
                     path.display(),
                     count,
                     if *count == 1 { "y" } else { "ies" }

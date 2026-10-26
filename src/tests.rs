@@ -83,10 +83,16 @@ fn named_param_takes_compared_column_type() {
     let analysis = ok("SELECT id FROM users WHERE email = :email AND age > :min_age");
     assert_eq!(
         param_summary(&analysis),
-        vec![("email".into(), SqlType::Text, false), ("min_age".into(), SqlType::Int, false)]
+        vec![
+            ("email".into(), SqlType::Text, false),
+            ("min_age".into(), SqlType::Int, false)
+        ]
     );
     assert!(!analysis.positional);
-    assert_eq!(analysis.params[0].source, Some(("users".into(), "email".into())));
+    assert_eq!(
+        analysis.params[0].source,
+        Some(("users".into(), "email".into()))
+    );
 }
 
 #[test]
@@ -113,7 +119,10 @@ fn repeated_positional_names_get_suffixes() {
 #[test]
 fn is_null_check_makes_param_nullable() {
     let analysis = ok("SELECT id FROM users WHERE (:name IS NULL OR name = :name)");
-    assert_eq!(param_summary(&analysis), vec![("name".into(), SqlType::Text, true)]);
+    assert_eq!(
+        param_summary(&analysis),
+        vec![("name".into(), SqlType::Text, true)]
+    );
 }
 
 #[test]
@@ -136,7 +145,10 @@ fn inner_join_keeps_not_null() {
     let analysis = ok("SELECT u.id, o.total FROM users u JOIN orders o ON o.user_id = u.id");
     assert_eq!(
         column_summary(&analysis),
-        vec![("id".into(), SqlType::Int, false), ("total".into(), SqlType::Float, false)]
+        vec![
+            ("id".into(), SqlType::Int, false),
+            ("total".into(), SqlType::Float, false)
+        ]
     );
 }
 
@@ -166,10 +178,14 @@ fn mixing_placeholder_styles_is_an_error() {
 
 #[test]
 fn insert_values_take_column_types_and_nullability() {
-    let analysis = ok("INSERT INTO users (email, name, created_at) VALUES (:email, :name, datetime('now'))");
+    let analysis =
+        ok("INSERT INTO users (email, name, created_at) VALUES (:email, :name, datetime('now'))");
     assert_eq!(
         param_summary(&analysis),
-        vec![("email".into(), SqlType::Text, false), ("name".into(), SqlType::Text, true)]
+        vec![
+            ("email".into(), SqlType::Text, false),
+            ("name".into(), SqlType::Text, true)
+        ]
     );
     assert!(analysis.columns.is_empty());
 }
@@ -182,10 +198,8 @@ fn insert_with_wrong_value_count_is_an_error() {
 
 #[test]
 fn insert_on_conflict_excluded_resolves() {
-    let analysis = ok(
-        "INSERT INTO users (id, email) VALUES (:id, :email) \
-         ON CONFLICT(id) DO UPDATE SET email = excluded.email, name = :name RETURNING id, email",
-    );
+    let analysis = ok("INSERT INTO users (id, email) VALUES (:id, :email) \
+         ON CONFLICT(id) DO UPDATE SET email = excluded.email, name = :name RETURNING id, email");
     assert_eq!(
         param_summary(&analysis),
         vec![
@@ -196,7 +210,10 @@ fn insert_on_conflict_excluded_resolves() {
     );
     assert_eq!(
         column_summary(&analysis),
-        vec![("id".into(), SqlType::Int, false), ("email".into(), SqlType::Text, false)]
+        vec![
+            ("id".into(), SqlType::Int, false),
+            ("email".into(), SqlType::Text, false)
+        ]
     );
 }
 
@@ -216,10 +233,16 @@ fn update_set_and_where_params() {
 #[test]
 fn delete_returning_produces_columns() {
     let analysis = ok("DELETE FROM orders WHERE user_id = :user_id RETURNING id, total");
-    assert_eq!(param_summary(&analysis), vec![("user_id".into(), SqlType::Int, false)]);
+    assert_eq!(
+        param_summary(&analysis),
+        vec![("user_id".into(), SqlType::Int, false)]
+    );
     assert_eq!(
         column_summary(&analysis),
-        vec![("id".into(), SqlType::Int, false), ("total".into(), SqlType::Float, false)]
+        vec![
+            ("id".into(), SqlType::Int, false),
+            ("total".into(), SqlType::Float, false)
+        ]
     );
 }
 
@@ -248,7 +271,10 @@ fn case_without_else_is_nullable() {
     let analysis = ok("SELECT CASE WHEN age > 18 THEN 'adult' END AS bucket, CASE WHEN age > 18 THEN 1 ELSE 0 END AS flag FROM users");
     assert_eq!(
         column_summary(&analysis),
-        vec![("bucket".into(), SqlType::Text, true), ("flag".into(), SqlType::Int, false)]
+        vec![
+            ("bucket".into(), SqlType::Text, true),
+            ("flag".into(), SqlType::Int, false)
+        ]
     );
 }
 
@@ -263,7 +289,10 @@ fn cte_union_and_subquery_params() {
     );
     assert_eq!(
         column_summary(&analysis),
-        vec![("id".into(), SqlType::Int, false), ("email".into(), SqlType::Text, false)]
+        vec![
+            ("id".into(), SqlType::Int, false),
+            ("email".into(), SqlType::Text, false)
+        ]
     );
     assert_eq!(
         param_summary(&analysis),
@@ -283,7 +312,10 @@ fn rowid_and_datetime_modifier_are_typed() {
     );
     assert_eq!(
         param_summary(&analysis),
-        vec![("count".into(), SqlType::Int, false), ("duration".into(), SqlType::Text, false)]
+        vec![
+            ("count".into(), SqlType::Int, false),
+            ("duration".into(), SqlType::Text, false)
+        ]
     );
 }
 
@@ -291,7 +323,10 @@ fn rowid_and_datetime_modifier_are_typed() {
 fn double_quoted_string_literal_warns() {
     let analysis = ok("UPDATE users SET name = \"BLOCK\" WHERE id = :id");
     assert!(
-        analysis.warnings.iter().any(|w| w.contains("Prefer single quotes")),
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("Prefer single quotes")),
         "{:?}",
         analysis.warnings
     );
@@ -300,8 +335,14 @@ fn double_quoted_string_literal_warns() {
 #[test]
 fn unknown_function_is_any_with_warning() {
     let analysis = ok("SELECT mystery(name) AS m FROM users WHERE id = :id");
-    assert_eq!(column_summary(&analysis), vec![("m".into(), SqlType::Any, true)]);
-    assert!(analysis.warnings.iter().any(|w| w.contains("unknown function `mystery`")));
+    assert_eq!(
+        column_summary(&analysis),
+        vec![("m".into(), SqlType::Any, true)]
+    );
+    assert!(analysis
+        .warnings
+        .iter()
+        .any(|w| w.contains("unknown function `mystery`")));
 }
 
 #[test]
@@ -309,7 +350,10 @@ fn unaliased_expression_gets_generated_name_and_warning() {
     let analysis = ok("SELECT age * 2, COUNT(*) FROM users");
     let names: Vec<&str> = analysis.columns.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["column_1", "count"]);
-    assert!(analysis.warnings.iter().any(|w| w.contains("add `AS <name>`")));
+    assert!(analysis
+        .warnings
+        .iter()
+        .any(|w| w.contains("add `AS <name>`")));
 }
 
 #[test]
@@ -327,10 +371,16 @@ fn schema_type_affinity() {
     assert_eq!(SqlType::from_type_name("TIMESTAMP"), SqlType::DateTime);
     assert_eq!(SqlType::from_type_name("JSON"), SqlType::Json);
     assert_eq!(SqlType::from_type_name("INTERVAL"), SqlType::Interval);
-    assert_eq!(SqlType::from_type_name("INTERVAL DAY TO SECOND"), SqlType::Interval);
+    assert_eq!(
+        SqlType::from_type_name("INTERVAL DAY TO SECOND"),
+        SqlType::Interval
+    );
     assert_eq!(SqlType::from_type_name("TIMETZ"), SqlType::Time);
     assert_eq!(SqlType::from_type_name("TINYINT(1)"), SqlType::Bool);
-    assert_eq!(SqlType::from_type_name("tinyint(1) unsigned"), SqlType::Bool);
+    assert_eq!(
+        SqlType::from_type_name("tinyint(1) unsigned"),
+        SqlType::Bool
+    );
     assert_eq!(SqlType::from_type_name("TINYINT(4)"), SqlType::Int);
     assert_eq!(SqlType::from_type_name("TINYINT"), SqlType::Int);
 }
@@ -342,7 +392,10 @@ fn optional_filter_sees_through_casts_and_parentheses() {
     );
     assert_eq!(
         param_summary(&analysis),
-        vec![("name".into(), SqlType::Text, true), ("min_age".into(), SqlType::Int, true)]
+        vec![
+            ("name".into(), SqlType::Text, true),
+            ("min_age".into(), SqlType::Int, true)
+        ]
     );
 }
 
@@ -352,7 +405,10 @@ fn is_not_null_test_also_marks_an_optional_filter() {
     let analysis = ok(
         "SELECT id FROM users WHERE (CAST(:name AS TEXT) IS NOT NULL AND name = :name) OR CAST(:name AS TEXT) IS NULL",
     );
-    assert_eq!(param_summary(&analysis), vec![("name".into(), SqlType::Text, true)]);
+    assert_eq!(
+        param_summary(&analysis),
+        vec![("name".into(), SqlType::Text, true)]
+    );
 }
 
 #[test]
@@ -389,12 +445,18 @@ fn recursive_cte_resolves_its_own_name_once() {
         SELECT id, depth FROM chain");
     assert_eq!(
         column_summary(&analysis),
-        vec![("id".into(), SqlType::Int, false), ("depth".into(), SqlType::Int, false)]
+        vec![
+            ("id".into(), SqlType::Int, false),
+            ("depth".into(), SqlType::Int, false)
+        ]
     );
     // Each placeholder is recorded once even though the body is analyzed repeatedly.
     assert_eq!(
         param_summary(&analysis),
-        vec![("id".into(), SqlType::Int, false), ("age".into(), SqlType::Int, false)]
+        vec![
+            ("id".into(), SqlType::Int, false),
+            ("age".into(), SqlType::Int, false)
+        ]
     );
     assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
 }
@@ -408,15 +470,23 @@ fn recursive_cte_widening_cascades_until_settled() {
             SELECT a + 0.5, b + a, d + b FROM c WHERE a < 3
         )
         SELECT a, b, d FROM c");
-    let types: Vec<SqlType> = analysis.columns.iter().map(|c| c.type_info.sql_type).collect();
+    let types: Vec<SqlType> = analysis
+        .columns
+        .iter()
+        .map(|c| c.type_info.sql_type)
+        .collect();
     assert_eq!(types, vec![SqlType::Float, SqlType::Float, SqlType::Float]);
 }
 
 #[test]
 fn derived_table_names_still_warn_inside_exists() {
-    let analysis = ok("SELECT id FROM users WHERE EXISTS (SELECT d.column_1 FROM (SELECT 1 + 2) AS d)");
+    let analysis =
+        ok("SELECT id FROM users WHERE EXISTS (SELECT d.column_1 FROM (SELECT 1 + 2) AS d)");
     assert!(
-        analysis.warnings.iter().any(|w| w.contains("unaliased expression `1 + 2`")),
+        analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("unaliased expression `1 + 2`")),
         "{:?}",
         analysis.warnings
     );
@@ -440,20 +510,34 @@ fn locking_clause_moves_after_limit_for_parsing() {
     let pg = sqlparser::dialect::PostgreSqlDialect {};
 
     assert_eq!(
-        move_locking_after_limit("SELECT id FROM t ORDER BY id FOR UPDATE OF t SKIP LOCKED LIMIT $1;", &pg).as_deref(),
+        move_locking_after_limit(
+            "SELECT id FROM t ORDER BY id FOR UPDATE OF t SKIP LOCKED LIMIT $1;",
+            &pg
+        )
+        .as_deref(),
         Some("SELECT id FROM t ORDER BY id LIMIT $1 FOR UPDATE OF t SKIP LOCKED;")
     );
     assert_eq!(
-        move_locking_after_limit("SELECT id FROM t FOR NO KEY UPDATE NOWAIT OFFSET 5 LIMIT 2", &pg).as_deref(),
+        move_locking_after_limit(
+            "SELECT id FROM t FOR NO KEY UPDATE NOWAIT OFFSET 5 LIMIT 2",
+            &pg
+        )
+        .as_deref(),
         Some("SELECT id FROM t OFFSET 5 LIMIT 2 FOR NO KEY UPDATE NOWAIT")
     );
     // A LIMIT inside a subquery or text inside a string literal is not a clause.
     assert_eq!(
-        move_locking_after_limit("SELECT (SELECT 1 LIMIT 1) FROM t WHERE note = 'FOR UPDATE LIMIT' FOR UPDATE", &pg),
+        move_locking_after_limit(
+            "SELECT (SELECT 1 LIMIT 1) FROM t WHERE note = 'FOR UPDATE LIMIT' FOR UPDATE",
+            &pg
+        ),
         None
     );
     // Already in sqlparser's order: nothing to move.
-    assert_eq!(move_locking_after_limit("SELECT id FROM t LIMIT 1 FOR UPDATE", &pg), None);
+    assert_eq!(
+        move_locking_after_limit("SELECT id FROM t LIMIT 1 FOR UPDATE", &pg),
+        None
+    );
 }
 
 #[test]
@@ -481,7 +565,8 @@ fn mysql_bare_dash_comments_become_comments() {
 
 #[test]
 fn sqlite_current_time_keywords_are_text() {
-    let analysis = ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
+    let analysis =
+        ok("SELECT current_timestamp AS ts, current_date AS d, current_time AS t FROM users");
     assert_eq!(
         column_summary(&analysis),
         vec![
@@ -510,7 +595,8 @@ CREATE TABLE a (x TEXT);
 -- a comment between statements; note the ';' inside 'it''s; quoted'
 CREATE TABLE b (y TEXT DEFAULT 'it''s; quoted');
 ";
-    let blocks = parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap();
+    let blocks =
+        parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap();
     assert_eq!(blocks.len(), 3);
 
     assert_eq!(blocks[0].name, None);
@@ -521,8 +607,14 @@ CREATE TABLE b (y TEXT DEFAULT 'it''s; quoted');
     assert_eq!(blocks[1].command, Some(Command::One));
     assert_eq!(blocks[1].line, 3);
     assert_eq!(blocks[1].doc, vec!["Fetch a row."]);
-    assert_eq!(blocks[1].param_types, vec![("id".to_string(), "int".to_string())]);
-    assert_eq!(blocks[1].statements[0].sql, "SELECT * FROM t WHERE id = :id");
+    assert_eq!(
+        blocks[1].param_types,
+        vec![("id".to_string(), "int".to_string())]
+    );
+    assert_eq!(
+        blocks[1].statements[0].sql,
+        "SELECT * FROM t WHERE id = :id"
+    );
     assert_eq!(blocks[1].statements[0].line, 6);
 
     assert_eq!(blocks[2].name.as_deref(), Some("setup"));
@@ -537,7 +629,8 @@ CREATE TABLE b (y TEXT DEFAULT 'it''s; quoted');
 #[test]
 fn query_file_accepts_legacy_header_style() {
     let contents = "-- get_user :one\nSELECT 1;\n\n-- just a comment :) not a header\n-- name: other :exec\nSELECT 2;\n";
-    let blocks = parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap();
+    let blocks =
+        parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap();
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0].name.as_deref(), Some("get_user"));
     assert_eq!(blocks[0].command, Some(Command::One));
@@ -557,9 +650,14 @@ fn top_level_output_dir_selects_python_output() {
 #[test]
 fn query_file_rejects_unknown_command() {
     let contents = "-- name: broken :fetch\nSELECT 1;\n";
-    let err = parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap_err();
+    let err =
+        parse_query_file(std::path::Path::new("q.sql"), contents, &SQLiteDialect {}).unwrap_err();
     assert_eq!(err.len(), 1);
-    assert!(err[0].message.contains("unknown command `:fetch`"), "{}", err[0]);
+    assert!(
+        err[0].message.contains("unknown command `:fetch`"),
+        "{}",
+        err[0]
+    );
     assert_eq!(err[0].line, 1);
 }
 
@@ -571,7 +669,8 @@ struct TempProject {
 
 impl TempProject {
     fn new(name: &str, config: &str, files: &[(&str, &str)]) -> TempProject {
-        let root = std::env::temp_dir().join(format!("butter-test-{}-{}", std::process::id(), name));
+        let root =
+            std::env::temp_dir().join(format!("butter-test-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("sql")).unwrap();
         std::fs::write(root.join("butter.toml"), config).unwrap();
@@ -634,25 +733,52 @@ UPDATE users SET name = :name WHERE id = ?;
     assert!(project.root.join("out/__init__.py").exists());
 
     assert!(code.contains("import mytypes\n"), "{code}");
-    assert!(code.contains("class GetUserRow(pydantic.BaseModel):"), "{code}");
+    assert!(
+        code.contains("class GetUserRow(pydantic.BaseModel):"),
+        "{code}"
+    );
     assert!(code.contains("    created_at: mytypes.Stamp\n"), "{code}");
     assert!(code.contains("    name: str | None\n"), "{code}");
     assert!(code.contains("async def get_user(\n    cursor: aiosqlite.Cursor,\n    *,\n    id: int,\n) -> GetUserRow | None:"), "{code}");
-    assert!(code.contains("\"\"\"All users, newest first.\"\"\""), "{code}");
-    assert!(code.contains("    limit: int,\n) -> list[ListUsersRow]:"), "{code}");
-    assert!(code.contains(") -> int | None:\n    \"\"\"Runs `create_user`.\"\"\""), "{code}");
+    assert!(
+        code.contains("\"\"\"All users, newest first.\"\"\""),
+        "{code}"
+    );
+    assert!(
+        code.contains("    limit: int,\n) -> list[ListUsersRow]:"),
+        "{code}"
+    );
+    assert!(
+        code.contains(") -> int | None:\n    \"\"\"Runs `create_user`.\"\"\""),
+        "{code}"
+    );
     assert!(code.contains("    return cursor.lastrowid\n"), "{code}");
-    assert!(code.contains("rows: typing.Iterable[AddOrdersParams],\n) -> int:"), "{code}");
-    assert!(code.contains("await cursor.executemany(ADD_ORDERS, [row.model_dump(by_alias=True) for row in rows])"), "{code}");
+    assert!(
+        code.contains("rows: typing.Iterable[AddOrdersParams],\n) -> int:"),
+        "{code}"
+    );
+    assert!(
+        code.contains(
+            "await cursor.executemany(ADD_ORDERS, [row.model_dump(by_alias=True) for row in rows])"
+        ),
+        "{code}"
+    );
     assert!(code.contains("return GetUserRow.model_validate(_row_dict(GetUserRow, row)) if row is not None else None"), "{code}");
-    assert!(code.contains("\nimport typing\n\nimport aiosqlite\nimport mytypes\nimport pydantic\n\n"), "{code}");
-    assert!(code.contains("    name: str | None = pydantic.Field(default=None)\n"), "{code}");
+    assert!(
+        code.contains("\nimport typing\n\nimport aiosqlite\nimport mytypes\nimport pydantic\n\n"),
+        "{code}"
+    );
+    assert!(
+        code.contains("    name: str | None = pydantic.Field(default=None)\n"),
+        "{code}"
+    );
     assert!(code.contains("    return cursor.rowcount\n"), "{code}");
 }
 
 #[test]
 fn exec_only_module_has_no_unused_imports() {
-    let queries = format!("{SCHEMA}\n-- name: reset :exec\nDELETE FROM orders;\nDELETE FROM users;\n");
+    let queries =
+        format!("{SCHEMA}\n-- name: reset :exec\nDELETE FROM orders;\nDELETE FROM users;\n");
     let project = TempProject::new("exec-only", CONFIG, &[("sql/reset.sql", &queries)]);
     crate::generate::run(&project.root, true).unwrap_or_else(|e| panic!("{e}"));
     let code = std::fs::read_to_string(project.root.join("out/reset.py")).unwrap();
@@ -681,12 +807,18 @@ SELECT emial FROM users;
     assert!(text.contains("returns no rows"), "{text}");
     assert!(text.contains("unknown column `emial`"), "{text}");
     assert!(text.contains("needs a header"), "{text}");
-    assert!(!project.root.join("out").exists(), "nothing is written when there are errors");
+    assert!(
+        !project.root.join("out").exists(),
+        "nothing is written when there are errors"
+    );
 }
 
 #[test]
 fn pascal_case_names() {
-    assert_eq!(crate::python::pascal_case("select_many_ipinfo_by_ip"), "SelectManyIpinfoByIp");
+    assert_eq!(
+        crate::python::pascal_case("select_many_ipinfo_by_ip"),
+        "SelectManyIpinfoByIp"
+    );
     assert_eq!(crate::python::pascal_case("x"), "X");
 }
 
@@ -713,10 +845,7 @@ fn sql_corpus_matches_expected_results() {
 
 fn run_corpus_case(case: &std::path::Path) {
     let name = case.file_name().unwrap().to_string_lossy();
-    let root = std::env::temp_dir().join(format!(
-        "butter-corpus-{}-{name}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("butter-corpus-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     copy_fixture_inputs(case, case, &root);
 
@@ -742,7 +871,10 @@ fn run_corpus_case(case: &std::path::Path) {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
             if expected.trim().is_empty() {
-                assert!(actual.is_empty(), "fixture {name}: unexpected warnings: {actual:?}");
+                assert!(
+                    actual.is_empty(),
+                    "fixture {name}: unexpected warnings: {actual:?}"
+                );
             } else {
                 let actual_text = actual.join("\n");
                 for expected_warning in expected.lines().filter(|line| !line.trim().is_empty()) {
@@ -759,7 +891,11 @@ fn run_corpus_case(case: &std::path::Path) {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-fn copy_fixture_inputs(case: &std::path::Path, source: &std::path::Path, destination: &std::path::Path) {
+fn copy_fixture_inputs(
+    case: &std::path::Path,
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) {
     for entry in std::fs::read_dir(source).unwrap() {
         let path = entry.unwrap().path();
         let relative = path.strip_prefix(case).unwrap();
@@ -785,11 +921,19 @@ fn compare_fixture_tree(expected: &std::path::Path, actual: &std::path::Path, na
     let mut actual_files = fixture_files(actual);
     expected_files.sort();
     actual_files.sort();
-    assert_eq!(actual_files, expected_files, "fixture {name}: generated file list differs");
+    assert_eq!(
+        actual_files, expected_files,
+        "fixture {name}: generated file list differs"
+    );
     for relative in expected_files {
         let expected_text = std::fs::read_to_string(expected.join(&relative)).unwrap();
         let actual_text = std::fs::read_to_string(actual.join(&relative)).unwrap();
-        assert_eq!(actual_text, expected_text, "fixture {name}: {} differs", relative.display());
+        assert_eq!(
+            actual_text,
+            expected_text,
+            "fixture {name}: {} differs",
+            relative.display()
+        );
     }
 }
 
@@ -800,7 +944,10 @@ fn fixture_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     fixture_files_from(root, root)
 }
 
-fn fixture_files_from(root: &std::path::Path, current: &std::path::Path) -> Vec<std::path::PathBuf> {
+fn fixture_files_from(
+    root: &std::path::Path,
+    current: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(current).unwrap() {
         let path = entry.unwrap().path();

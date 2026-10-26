@@ -88,12 +88,15 @@ impl Config {
                 sql_types: python.sql_types.clone(),
             });
         }
-        self.generate.output_dir.as_ref().map(|output_dir| PythonConfig {
-            output_dir: output_dir.clone(),
-            driver: None,
-            column_types: BTreeMap::new(),
-            sql_types: BTreeMap::new(),
-        })
+        self.generate
+            .output_dir
+            .as_ref()
+            .map(|output_dir| PythonConfig {
+                output_dir: output_dir.clone(),
+                driver: None,
+                column_types: BTreeMap::new(),
+                sql_types: BTreeMap::new(),
+            })
     }
 
     pub fn schema_files(&self) -> Vec<PathBuf> {

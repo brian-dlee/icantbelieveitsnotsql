@@ -4,11 +4,12 @@
 use std::collections::HashSet;
 
 use sqlparser::ast::{
-    AccessExpr, Assignment, AssignmentTarget, BinaryOperator, DateTimeField, Delete, Expr, FromTable, Function,
-    FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert, JoinConstraint,
-    JoinOperator, LimitClause, OnConflictAction, OnInsert, OrderByKind, Query,
-    Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, Subscript, TableAlias,
-    Set, TableFactor, TableObject, TableWithJoins, UnaryOperator, UpdateTableFromKind, Value,
+    AccessExpr, Assignment, AssignmentTarget, BinaryOperator, DateTimeField, Delete, Expr,
+    FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Insert,
+    JoinConstraint, JoinOperator, LimitClause, OnConflictAction, OnInsert, OrderByKind, Query,
+    Select, SelectItem, SelectItemQualifiedWildcardKind, Set, SetExpr, Statement, Subscript,
+    TableAlias, TableFactor, TableObject, TableWithJoins, UnaryOperator, UpdateTableFromKind,
+    Value,
 };
 
 use crate::dialect::SqlDialect;
@@ -130,10 +131,9 @@ impl<'a> Scope<'a> {
                     Some(column) => {
                         Resolution::Found(with_join_nullability(column, scope_table.nullable))
                     }
-                    None if is_rowid(name) => Resolution::Found(Column::new(
-                        name,
-                        TypeInfo::not_null(SqlType::Int),
-                    )),
+                    None if is_rowid(name) => {
+                        Resolution::Found(Column::new(name, TypeInfo::not_null(SqlType::Int)))
+                    }
                     None => Resolution::NotFound,
                 };
             }
@@ -306,7 +306,10 @@ pub fn analyze_statement(
 
     let (kind, columns) = match statement {
         Statement::Query(query) => (StatementKind::Select, analyzer.analyze_query(query, None)?),
-        Statement::Insert(insert) => (StatementKind::Insert, analyzer.analyze_insert(insert, &root)?),
+        Statement::Insert(insert) => (
+            StatementKind::Insert,
+            analyzer.analyze_insert(insert, &root)?,
+        ),
         Statement::Update {
             table,
             assignments,
@@ -327,14 +330,18 @@ pub fn analyze_statement(
                 &root,
             )?,
         ),
-        Statement::Delete(delete) => (StatementKind::Delete, analyzer.analyze_delete(delete, &root)?),
+        Statement::Delete(delete) => (
+            StatementKind::Delete,
+            analyzer.analyze_delete(delete, &root)?,
+        ),
         // `SET x = :value`: walk the values so their placeholders are bound.
         Statement::Set(set) => {
             let values: Vec<&Expr> = match set {
-                Set::SingleAssignment { values, .. } | Set::ParenthesizedAssignments { values, .. } => {
-                    values.iter().collect()
+                Set::SingleAssignment { values, .. }
+                | Set::ParenthesizedAssignments { values, .. } => values.iter().collect(),
+                Set::MultipleAssignments { assignments } => {
+                    assignments.iter().map(|a| &a.value).collect()
                 }
-                Set::MultipleAssignments { assignments } => assignments.iter().map(|a| &a.value).collect(),
                 _ => Vec::new(),
             };
             for value in values {
@@ -364,7 +371,11 @@ pub fn analyze_statement(
 }
 
 /// Output columns of a `CREATE VIEW` body, for registering views as tables.
-pub fn analyze_view_columns(query: &Query, schema: &Schema, dialect: SqlDialect) -> Result<Vec<Column>, String> {
+pub fn analyze_view_columns(
+    query: &Query,
+    schema: &Schema,
+    dialect: SqlDialect,
+) -> Result<Vec<Column>, String> {
     let mut analyzer = Analyzer {
         schema,
         dialect,
@@ -380,7 +391,10 @@ impl<'s> Analyzer<'s> {
     /// Runs `analyze` with the "unaliased expression" warning active again,
     /// for nested queries whose column names are used (derived tables and
     /// CTEs without a column list) inside a quiet context.
-    fn loudly<T>(&mut self, analyze: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+    fn loudly<T>(
+        &mut self,
+        analyze: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
         let saved = std::mem::replace(&mut self.unnamed_depth, 0);
         let result = analyze(self);
         self.unnamed_depth = saved;
@@ -388,7 +402,10 @@ impl<'s> Analyzer<'s> {
     }
 
     /// Runs `analyze` with the "unaliased expression" warning silenced.
-    fn quietly<T>(&mut self, analyze: impl FnOnce(&mut Self) -> Result<T, String>) -> Result<T, String> {
+    fn quietly<T>(
+        &mut self,
+        analyze: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
         self.unnamed_depth += 1;
         let result = analyze(self);
         self.unnamed_depth -= 1;
@@ -429,9 +446,11 @@ impl<'s> Analyzer<'s> {
         expected: Option<&Column>,
         hint: Option<&str>,
     ) {
-        let hint = hint
-            .map(|h| h.to_string())
-            .or_else(|| expected.filter(|c| !c.name.is_empty()).map(|c| c.name.clone()));
+        let hint = hint.map(|h| h.to_string()).or_else(|| {
+            expected
+                .filter(|c| !c.name.is_empty())
+                .map(|c| c.name.clone())
+        });
 
         self.params.push(RawParam {
             token: token.to_string(),
@@ -622,7 +641,11 @@ impl<'s> Analyzer<'s> {
 
     // --------------------------------------------------------------- queries
 
-    fn analyze_query(&mut self, query: &Query, parent: Option<&Scope>) -> Result<Vec<Column>, String> {
+    fn analyze_query(
+        &mut self,
+        query: &Query,
+        parent: Option<&Scope>,
+    ) -> Result<Vec<Column>, String> {
         let mut cte_scope = Scope {
             parent,
             ..Default::default()
@@ -635,7 +658,11 @@ impl<'s> Analyzer<'s> {
                 // body's names are used even inside a quiet context. An error
                 // abandons the whole analysis, so the counter needs no reset then.
                 let saved_depth = self.unnamed_depth;
-                self.unnamed_depth = if cte.alias.columns.is_empty() { 0 } else { saved_depth + 1 };
+                self.unnamed_depth = if cte.alias.columns.is_empty() {
+                    0
+                } else {
+                    saved_depth + 1
+                };
                 let anchor = match cte.query.body.as_ref() {
                     SetExpr::SetOperation { left, .. } if with.recursive => Some(left),
                     _ => None,
@@ -666,7 +693,10 @@ impl<'s> Analyzer<'s> {
                         });
                         let next = self.analyze_query(&cte.query, Some(&recursive_scope))?;
                         let settled = next.len() == columns.len()
-                            && next.iter().zip(&columns).all(|(a, b)| a.type_info == b.type_info);
+                            && next
+                                .iter()
+                                .zip(&columns)
+                                .all(|(a, b)| a.type_info == b.type_info);
                         if settled || pass + 1 == max_passes {
                             columns = next;
                             break;
@@ -720,7 +750,11 @@ impl<'s> Analyzer<'s> {
                     .map(|(l, r)| Column {
                         name: l.name.clone(),
                         type_info: TypeInfo::unify(&l.type_info, &r.type_info),
-                        source: if l.source == r.source { l.source.clone() } else { None },
+                        source: if l.source == r.source {
+                            l.source.clone()
+                        } else {
+                            None
+                        },
                     })
                     .collect();
 
@@ -826,7 +860,11 @@ impl<'s> Analyzer<'s> {
         Ok(columns)
     }
 
-    fn analyze_projection(&mut self, items: &[SelectItem], scope: &Scope) -> Result<Vec<Column>, String> {
+    fn analyze_projection(
+        &mut self,
+        items: &[SelectItem],
+        scope: &Scope,
+    ) -> Result<Vec<Column>, String> {
         let mut columns: Vec<Column> = Vec::new();
 
         for (index, item) in items.iter().enumerate() {
@@ -879,15 +917,20 @@ impl<'s> Analyzer<'s> {
     fn derive_column_name(&mut self, expr: &Expr, index: usize) -> String {
         match expr {
             Expr::Identifier(ident) => ident.value.clone(),
-            Expr::CompoundIdentifier(idents) => idents.last().map(|i| i.value.clone()).unwrap_or_default(),
+            Expr::CompoundIdentifier(idents) => {
+                idents.last().map(|i| i.value.clone()).unwrap_or_default()
+            }
             Expr::Function(function) => object_name_last(&function.name).to_lowercase(),
             // `@rn := expr` is named after its variable.
             Expr::BinaryOp {
                 left,
                 op: BinaryOperator::Assignment,
                 ..
-            } if matches!(left.as_ref(), Expr::Identifier(ident) if self.is_mysql_variable(&ident.value)) => {
-                let Expr::Identifier(ident) = left.as_ref() else { unreachable!() };
+            } if matches!(left.as_ref(), Expr::Identifier(ident) if self.is_mysql_variable(&ident.value)) =>
+            {
+                let Expr::Identifier(ident) = left.as_ref() else {
+                    unreachable!()
+                };
                 ident.value.trim_start_matches('@').to_string()
             }
             _ => {
@@ -906,8 +949,14 @@ impl<'s> Analyzer<'s> {
     /// Like `walk_expr`, but a bare column reference must resolve.
     fn walk_projection_expr(&mut self, expr: &Expr, scope: &Scope) -> Result<Column, String> {
         match expr {
-            Expr::Identifier(ident) if self.is_mysql_variable(&ident.value) => Ok(self.mysql_variable(&ident.value)),
-            Expr::CompoundIdentifier(idents) if idents.first().is_some_and(|i| self.is_mysql_variable(&i.value)) => {
+            Expr::Identifier(ident) if self.is_mysql_variable(&ident.value) => {
+                Ok(self.mysql_variable(&ident.value))
+            }
+            Expr::CompoundIdentifier(idents)
+                if idents
+                    .first()
+                    .is_some_and(|i| self.is_mysql_variable(&i.value)) =>
+            {
                 Ok(anonymous(SqlType::Any, true))
             }
             Expr::Identifier(ident) => self.column_strict(scope, None, &ident.value),
@@ -919,7 +968,12 @@ impl<'s> Analyzer<'s> {
         }
     }
 
-    fn column_strict(&mut self, scope: &Scope, qualifier: Option<&str>, name: &str) -> Result<Column, String> {
+    fn column_strict(
+        &mut self,
+        scope: &Scope,
+        qualifier: Option<&str>,
+        name: &str,
+    ) -> Result<Column, String> {
         match scope.resolve_column(qualifier, name) {
             Resolution::Found(column) => Ok(column),
             Resolution::Ambiguous(tables) => Err(format!(
@@ -945,7 +999,13 @@ impl<'s> Analyzer<'s> {
         }
     }
 
-    fn column_lenient(&mut self, scope: &Scope, qualifier: Option<&str>, name: &str, quoted: bool) -> Column {
+    fn column_lenient(
+        &mut self,
+        scope: &Scope,
+        qualifier: Option<&str>,
+        name: &str,
+        quoted: bool,
+    ) -> Column {
         match scope.resolve_column(qualifier, name) {
             Resolution::Found(column) => column,
             Resolution::Ambiguous(tables) => {
@@ -977,7 +1037,11 @@ impl<'s> Analyzer<'s> {
 
     // ------------------------------------------------------------ FROM clause
 
-    fn add_table_with_joins(&mut self, scope: &mut Scope, table_with_joins: &TableWithJoins) -> Result<(), String> {
+    fn add_table_with_joins(
+        &mut self,
+        scope: &mut Scope,
+        table_with_joins: &TableWithJoins,
+    ) -> Result<(), String> {
         let start = scope.tables.len();
         self.add_table_factor(scope, &table_with_joins.relation, false)?;
 
@@ -1005,7 +1069,12 @@ impl<'s> Analyzer<'s> {
         Ok(())
     }
 
-    fn add_table_factor(&mut self, scope: &mut Scope, factor: &TableFactor, nullable: bool) -> Result<(), String> {
+    fn add_table_factor(
+        &mut self,
+        scope: &mut Scope,
+        factor: &TableFactor,
+        nullable: bool,
+    ) -> Result<(), String> {
         match factor {
             TableFactor::Table { name, alias, .. } => {
                 let table_name = object_name_last(name);
@@ -1031,7 +1100,9 @@ impl<'s> Analyzer<'s> {
                     nullable,
                 });
             }
-            TableFactor::Derived { subquery, alias, .. } => {
+            TableFactor::Derived {
+                subquery, alias, ..
+            } => {
                 let named_by_alias = alias.as_ref().is_some_and(|a| !a.columns.is_empty());
                 let mut columns = if named_by_alias {
                     self.quietly(|a| a.analyze_query(subquery, Some(&*scope)))?
@@ -1206,7 +1277,9 @@ impl<'s> Analyzer<'s> {
 
         if let Some(from) = from {
             let tables = match from {
-                UpdateTableFromKind::BeforeSet(tables) | UpdateTableFromKind::AfterSet(tables) => tables,
+                UpdateTableFromKind::BeforeSet(tables) | UpdateTableFromKind::AfterSet(tables) => {
+                    tables
+                }
             };
             for table_with_joins in tables {
                 self.add_table_with_joins(&mut scope, table_with_joins)?;
@@ -1289,7 +1362,14 @@ impl<'s> Analyzer<'s> {
                 }
                 Value::Number(text, _) => {
                     let is_float = text.contains('.') || text.contains('e') || text.contains('E');
-                    Ok(anonymous(if is_float { SqlType::Float } else { SqlType::Int }, false))
+                    Ok(anonymous(
+                        if is_float {
+                            SqlType::Float
+                        } else {
+                            SqlType::Int
+                        },
+                        false,
+                    ))
                 }
                 Value::SingleQuotedString(_)
                 | Value::DoubleQuotedString(_)
@@ -1302,9 +1382,15 @@ impl<'s> Analyzer<'s> {
                 Value::Null => Ok(anonymous(SqlType::Any, true)),
                 _ => Ok(anonymous(SqlType::Any, true)),
             },
-            Expr::Identifier(ident) if self.is_mysql_variable(&ident.value) => Ok(self.mysql_variable(&ident.value)),
+            Expr::Identifier(ident) if self.is_mysql_variable(&ident.value) => {
+                Ok(self.mysql_variable(&ident.value))
+            }
             // `@@session.sql_mode` and friends.
-            Expr::CompoundIdentifier(idents) if idents.first().is_some_and(|i| self.is_mysql_variable(&i.value)) => {
+            Expr::CompoundIdentifier(idents)
+                if idents
+                    .first()
+                    .is_some_and(|i| self.is_mysql_variable(&i.value)) =>
+            {
                 Ok(anonymous(SqlType::Any, true))
             }
             Expr::Identifier(ident) => {
@@ -1385,7 +1471,9 @@ impl<'s> Analyzer<'s> {
                 self.walk_expr(expr, Some(&expected), hint, scope)?;
                 Ok(anonymous(SqlType::Bool, false))
             }
-            Expr::Between { expr, low, high, .. } => {
+            Expr::Between {
+                expr, low, high, ..
+            } => {
                 let subject = self.walk_expr(expr, None, None, scope)?;
                 let expected = comparison_target(&subject);
                 let hint = column_hint(expr);
@@ -1403,7 +1491,9 @@ impl<'s> Analyzer<'s> {
                 self.walk_expr(pattern, Some(&expected), hint.as_deref(), scope)?;
                 Ok(anonymous(SqlType::Bool, false))
             }
-            Expr::Cast { expr, data_type, .. } => {
+            Expr::Cast {
+                expr, data_type, ..
+            } => {
                 let target = Column {
                     name: String::new(),
                     type_info: TypeInfo {
@@ -1463,7 +1553,10 @@ impl<'s> Analyzer<'s> {
             Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
                 let l = self.walk_expr(left, None, None, scope)?;
                 let r = self.walk_expr(right, None, None, scope)?;
-                Ok(anonymous(SqlType::Bool, l.type_info.nullable || r.type_info.nullable))
+                Ok(anonymous(
+                    SqlType::Bool,
+                    l.type_info.nullable || r.type_info.nullable,
+                ))
             }
             Expr::Exists { subquery, .. } => {
                 self.quietly(|a| a.analyze_query(subquery, Some(scope)))?;
@@ -1530,7 +1623,10 @@ impl<'s> Analyzer<'s> {
                     }
                 }
 
-                self.warn(format!("expression `{}` is not understood; typed as Any", expr));
+                self.warn(format!(
+                    "expression `{}` is not understood; typed as Any",
+                    expr
+                ));
                 Ok(anonymous(SqlType::Any, true))
             }
             Expr::Function(function) => self.walk_function(function, expected, hint, scope),
@@ -1604,7 +1700,14 @@ impl<'s> Analyzer<'s> {
                                 | DateTimeField::Microsecond
                         )
                     );
-                let expected = typed_hint("", if single_unit { SqlType::Int } else { SqlType::Text });
+                let expected = typed_hint(
+                    "",
+                    if single_unit {
+                        SqlType::Int
+                    } else {
+                        SqlType::Text
+                    },
+                );
                 let value = self.walk_expr(&interval.value, Some(&expected), None, scope)?;
                 Ok(anonymous(SqlType::Interval, value.type_info.nullable))
             }
@@ -1619,7 +1722,10 @@ impl<'s> Analyzer<'s> {
             }
             Expr::Wildcard(_) | Expr::QualifiedWildcard(..) => Ok(anonymous(SqlType::Any, true)),
             other => {
-                self.warn(format!("expression `{}` is not understood; typed as Any", other));
+                self.warn(format!(
+                    "expression `{}` is not understood; typed as Any",
+                    other
+                ));
                 Ok(anonymous(SqlType::Any, true))
             }
         }
@@ -1673,7 +1779,8 @@ impl<'s> Analyzer<'s> {
                     let value = self.walk_expr(right, None, None, scope)?;
                     let mut stored = value.clone();
                     stored.name = String::new();
-                    self.user_variables.insert(ident.value.to_lowercase(), stored);
+                    self.user_variables
+                        .insert(ident.value.to_lowercase(), stored);
                     Ok(Column {
                         name: String::new(),
                         ..value
@@ -1701,7 +1808,10 @@ impl<'s> Analyzer<'s> {
                     _ => None,
                 }
                 .unwrap_or_else(|| arithmetic_type(a, b));
-                Ok(anonymous(sql_type, l.type_info.nullable || r.type_info.nullable))
+                Ok(anonymous(
+                    sql_type,
+                    l.type_info.nullable || r.type_info.nullable,
+                ))
             }
             StringConcat => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
@@ -1723,7 +1833,10 @@ impl<'s> Analyzer<'s> {
                 let json = self.dialect == SqlDialect::PostgreSQL
                     && ((l.type_info.sql_type == SqlType::Json && resolves_to_json(&r, right))
                         || (r.type_info.sql_type == SqlType::Json && resolves_to_json(&l, left)));
-                Ok(anonymous(if json { SqlType::Json } else { SqlType::Text }, nullable))
+                Ok(anonymous(
+                    if json { SqlType::Json } else { SqlType::Text },
+                    nullable,
+                ))
             }
             Arrow | HashArrow => {
                 self.walk_expr(left, None, None, scope)?;
@@ -1746,7 +1859,10 @@ impl<'s> Analyzer<'s> {
             }
             _ => {
                 let (l, r) = self.walk_pair(left, right, scope, false)?;
-                Ok(anonymous(SqlType::Any, l.type_info.nullable || r.type_info.nullable))
+                Ok(anonymous(
+                    SqlType::Any,
+                    l.type_info.nullable || r.type_info.nullable,
+                ))
             }
         }
     }
@@ -1803,12 +1919,23 @@ impl<'s> Analyzer<'s> {
                     }
 
                     let arg_expected = function_arg_expectation(&name, index, &arg_types, expected);
-                    let arg_hint = if matches!(name.as_str(), "coalesce" | "ifnull" | "nullif" | "iif" | "max" | "min" | "greatest" | "least") {
+                    let arg_hint = if matches!(
+                        name.as_str(),
+                        "coalesce"
+                            | "ifnull"
+                            | "nullif"
+                            | "iif"
+                            | "max"
+                            | "min"
+                            | "greatest"
+                            | "least"
+                    ) {
                         hint
                     } else {
                         None
                     };
-                    let arg_type = self.walk_expr(arg_expr, arg_expected.as_ref(), arg_hint, scope)?;
+                    let arg_type =
+                        self.walk_expr(arg_expr, arg_expected.as_ref(), arg_hint, scope)?;
                     arg_exprs.push(arg_expr);
                     arg_types.push(arg_type);
                 }
@@ -1864,7 +1991,9 @@ impl<'s> Analyzer<'s> {
                     result.name = String::new();
                     result
                 } else {
-                    let mut result = first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true));
+                    let mut result = first
+                        .cloned()
+                        .unwrap_or_else(|| anonymous(SqlType::Any, true));
                     result.name = String::new();
                     result.type_info.nullable = true;
                     result
@@ -1872,19 +2001,20 @@ impl<'s> Analyzer<'s> {
             }
             "group_concat" | "string_agg" => anonymous(SqlType::Text, true),
             "coalesce" | "ifnull" => {
-                let mut result = args
-                    .iter()
-                    .skip(1)
-                    .fold(
-                        first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true)),
-                        |acc, a| unify_columns(&acc, a),
-                    );
+                let mut result = args.iter().skip(1).fold(
+                    first
+                        .cloned()
+                        .unwrap_or_else(|| anonymous(SqlType::Any, true)),
+                    |acc, a| unify_columns(&acc, a),
+                );
                 result.name = String::new();
                 result.type_info.nullable = all_nullable;
                 result
             }
             "nullif" => {
-                let mut result = first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true));
+                let mut result = first
+                    .cloned()
+                    .unwrap_or_else(|| anonymous(SqlType::Any, true));
                 result.name = String::new();
                 result.type_info.nullable = true;
                 result
@@ -1903,9 +2033,7 @@ impl<'s> Analyzer<'s> {
                 result
             }
             "length" | "instr" | "unicode" | "octet_length" | "json_array_length"
-            | "jsonb_array_length" | "json_valid" => {
-                anonymous(SqlType::Int, any_nullable)
-            }
+            | "jsonb_array_length" | "json_valid" => anonymous(SqlType::Int, any_nullable),
             "cardinality" => anonymous(SqlType::Int, any_nullable),
             "array_ndims" => anonymous(SqlType::Int, true),
             "array_length" | "array_lower" | "array_upper" | "array_position" => {
@@ -1915,9 +2043,8 @@ impl<'s> Analyzer<'s> {
             }
             "lower" | "upper" | "trim" | "ltrim" | "rtrim" | "substr" | "substring" | "replace"
             | "hex" | "printf" | "format" | "char" | "soundex" | "json_type" | "json_typeof"
-            | "jsonb_typeof"
-            | "json_quote" | "json_pretty" | "jsonb_pretty"
-            | "json" | "json_object" | "json_array" | "json_set" | "json_insert" | "json_replace"
+            | "jsonb_typeof" | "json_quote" | "json_pretty" | "jsonb_pretty" | "json"
+            | "json_object" | "json_array" | "json_set" | "json_insert" | "json_replace"
             | "json_remove" | "json_patch" | "json_group_array" | "json_group_object" => {
                 anonymous(SqlType::Text, any_nullable)
             }
@@ -1928,13 +2055,17 @@ impl<'s> Analyzer<'s> {
             "json_extract_path_text" | "jsonb_extract_path_text" => anonymous(SqlType::Text, true),
             "json_extract" | "->" | "->>" => anonymous(SqlType::Any, true),
             "abs" | "likely" | "unlikely" | "likelihood" => {
-                let mut result = first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true));
+                let mut result = first
+                    .cloned()
+                    .unwrap_or_else(|| anonymous(SqlType::Any, true));
                 result.name = String::new();
                 result
             }
             // MySQL's VALUES(column) in ON DUPLICATE KEY UPDATE refers to
             // the value proposed by the INSERT for that column.
-            "values" => first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true)),
+            "values" => first
+                .cloned()
+                .unwrap_or_else(|| anonymous(SqlType::Any, true)),
             "round" | "julianday" | "sqrt" | "power" | "pow" | "exp" | "ln" | "log" | "log10"
             | "log2" | "pi" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
             | "degrees" | "radians" | "trunc" | "ceil" | "ceiling" | "floor" | "mod" => {
@@ -1944,24 +2075,27 @@ impl<'s> Analyzer<'s> {
                 anonymous(SqlType::Int, false)
             }
             "randomblob" | "zeroblob" | "unhex" => anonymous(SqlType::Blob, false),
-            "date" | "time" | "datetime" | "strftime" | "timediff" => anonymous(SqlType::Text, true),
+            "date" | "time" | "datetime" | "strftime" | "timediff" => {
+                anonymous(SqlType::Text, true)
+            }
             "unixepoch" => anonymous(SqlType::Int, true),
             "row_number" | "rank" | "dense_rank" | "ntile" => anonymous(SqlType::Int, false),
             "lag" | "lead" | "first_value" | "last_value" | "nth_value" => {
-                let mut result = first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true));
+                let mut result = first
+                    .cloned()
+                    .unwrap_or_else(|| anonymous(SqlType::Any, true));
                 result.name = String::new();
                 result.type_info.nullable = true;
                 result
             }
             "percent_rank" | "cume_dist" => anonymous(SqlType::Float, false),
             "greatest" | "least" => {
-                let mut result = args
-                    .iter()
-                    .skip(1)
-                    .fold(
-                        first.cloned().unwrap_or_else(|| anonymous(SqlType::Any, true)),
-                        |acc, a| unify_columns(&acc, a),
-                    );
+                let mut result = args.iter().skip(1).fold(
+                    first
+                        .cloned()
+                        .unwrap_or_else(|| anonymous(SqlType::Any, true)),
+                    |acc, a| unify_columns(&acc, a),
+                );
                 result.name = String::new();
                 // MySQL returns NULL if any argument is NULL; PostgreSQL ignores NULLs.
                 result.type_info.nullable = if self.dialect == SqlDialect::MySQL {
@@ -1975,7 +2109,9 @@ impl<'s> Analyzer<'s> {
                 anonymous(SqlType::DateTime, false)
             }
             // SQLite returns these as text; PostgreSQL and MySQL return temporal values.
-            "current_timestamp" | "localtimestamp" => anonymous(self.dialect_temporal(SqlType::DateTime), false),
+            "current_timestamp" | "localtimestamp" => {
+                anonymous(self.dialect_temporal(SqlType::DateTime), false)
+            }
             "current_date" => anonymous(self.dialect_temporal(SqlType::Date), false),
             "current_time" | "localtime" => anonymous(self.dialect_temporal(SqlType::Time), false),
             "date_trunc" => {
@@ -2023,9 +2159,9 @@ fn postgresql_function_result(name: &str, args: &[Column], has_named_args: bool)
             anonymous(Json, false)
         }
         // json[b]_object take text arrays and are strict.
-        "json_object" | "jsonb_object" | "to_json" | "to_jsonb" | "row_to_json" | "array_to_json"
-        | "jsonb_set" | "jsonb_insert"
-        | "jsonb_strip_nulls" | "json_strip_nulls" => anonymous(Json, any_nullable),
+        "json_object" | "jsonb_object" | "to_json" | "to_jsonb" | "row_to_json"
+        | "array_to_json" | "jsonb_set" | "jsonb_insert" | "jsonb_strip_nulls"
+        | "json_strip_nulls" => anonymous(Json, any_nullable),
         // NULL only from target, path or create_if_missing; a NULL new_value is
         // handled by null_value_treatment.
         // With named arguments the positions are unknown: stay conservative.
@@ -2034,7 +2170,9 @@ fn postgresql_function_result(name: &str, args: &[Column], has_named_args: bool)
             if has_named_args {
                 any_nullable
             } else {
-                [0, 1, 3].iter().any(|&i| args.get(i).is_some_and(|a| a.type_info.nullable))
+                [0, 1, 3]
+                    .iter()
+                    .any(|&i| args.get(i).is_some_and(|a| a.type_info.nullable))
             },
         ),
         // Aggregates over no rows return NULL.
@@ -2045,11 +2183,10 @@ fn postgresql_function_result(name: &str, args: &[Column], has_named_args: bool)
         "current_setting" => anonymous(Text, args.len() > 1 || any_nullable),
         "array_agg" => {
             let element = args.first()?;
-            let element_type = element
-                .type_info
-                .declared
-                .clone()
-                .or_else(|| postgresql_type_name(element.type_info.sql_type).map(str::to_string))?;
+            let element_type =
+                element.type_info.declared.clone().or_else(|| {
+                    postgresql_type_name(element.type_info.sql_type).map(str::to_string)
+                })?;
             Column::new(
                 "",
                 TypeInfo {
@@ -2136,15 +2273,19 @@ fn mysql_function_result(name: &str, exprs: &[&Expr], args: &[Column]) -> Option
             // The format decides: any time specifier gives a DATETIME.
             let format = match exprs.get(1) {
                 Some(Expr::Value(v)) => match &v.value {
-                    Value::SingleQuotedString(format) | Value::DoubleQuotedString(format) => Some(format.clone()),
+                    Value::SingleQuotedString(format) | Value::DoubleQuotedString(format) => {
+                        Some(format.clone())
+                    }
                     _ => None,
                 },
                 _ => None,
             };
-            let has_time = format.map_or(true, |f| {
-                ["%H", "%h", "%I", "%i", "%k", "%l", "%p", "%r", "%S", "%s", "%T", "%f"]
-                    .iter()
-                    .any(|spec| f.contains(spec))
+            let has_time = format.is_none_or(|f| {
+                [
+                    "%H", "%h", "%I", "%i", "%k", "%l", "%p", "%r", "%S", "%s", "%T", "%f",
+                ]
+                .iter()
+                .any(|spec| f.contains(spec))
             });
             // Invalid input yields NULL.
             anonymous(if has_time { DateTime } else { Date }, true)
@@ -2166,20 +2307,26 @@ fn mysql_function_result(name: &str, exprs: &[&Expr], args: &[Column]) -> Option
         "from_unixtime" => anonymous(if args.len() > 1 { Text } else { DateTime }, true),
         // NULL when a time zone is unknown (or the zone tables are not loaded).
         "convert_tz" => anonymous(DateTime, true),
-        "timestampdiff" | "datediff" | "to_days" | "dayofweek" | "dayofmonth" | "dayofyear" | "weekday"
-        | "week" | "weekofyear" | "yearweek" | "year" | "month" | "day" | "hour" | "minute" | "second"
-        | "quarter" | "microsecond" => anonymous(Int, any_nullable),
+        "timestampdiff" | "datediff" | "to_days" | "dayofweek" | "dayofmonth" | "dayofyear"
+        | "weekday" | "week" | "weekofyear" | "yearweek" | "year" | "month" | "day" | "hour"
+        | "minute" | "second" | "quarter" | "microsecond" => anonymous(Int, any_nullable),
         "dayname" | "monthname" | "date_format" | "time_format" => anonymous(Text, any_nullable),
         "curdate" | "utc_date" => anonymous(Date, false),
         "curtime" | "utc_time" => anonymous(Time, false),
         "sysdate" | "utc_timestamp" => anonymous(DateTime, false),
         "rand" => anonymous(Float, false),
-        "left" | "right" | "lpad" | "rpad" | "repeat" | "reverse" | "space" | "upper" | "lower" | "ucase"
-        | "lcase" | "substring_index" | "md5" | "sha1" | "sha2" | "uuid" => anonymous(Text, any_nullable),
+        "left" | "right" | "lpad" | "rpad" | "repeat" | "reverse" | "space" | "upper" | "lower"
+        | "ucase" | "lcase" | "substring_index" | "md5" | "sha1" | "sha2" | "uuid" => {
+            anonymous(Text, any_nullable)
+        }
         "json_unquote" => anonymous(Text, true),
         "json_extract" | "json_arrayagg" | "json_objectagg" => anonymous(Json, true),
         "json_array" | "json_object" => anonymous(Json, false),
-        "json_set" | "json_insert" | "json_replace" | "json_remove" | "json_merge_patch"
+        "json_set"
+        | "json_insert"
+        | "json_replace"
+        | "json_remove"
+        | "json_merge_patch"
         | "json_merge_preserve" => anonymous(Json, any_nullable),
         "json_contains" | "json_length" | "json_depth" => anonymous(Int, true),
         "found_rows" | "row_count" | "last_insert_id" | "connection_id" => anonymous(Int, false),
@@ -2230,7 +2377,11 @@ fn unify_columns(a: &Column, b: &Column) -> Column {
     Column {
         name: a.name.clone(),
         type_info: TypeInfo::unify(&a.type_info, &b.type_info),
-        source: if a.source == b.source { a.source.clone() } else { None },
+        source: if a.source == b.source {
+            a.source.clone()
+        } else {
+            None
+        },
     }
 }
 
@@ -2313,8 +2464,8 @@ fn function_arg_expectation(
                 text()
             }
         }
-        "date_add" | "date_sub" | "adddate" | "subdate" | "date_format" | "unix_timestamp" | "dayname"
-        | "dayofweek" | "timestamp"
+        "date_add" | "date_sub" | "adddate" | "subdate" | "date_format" | "unix_timestamp"
+        | "dayname" | "dayofweek" | "timestamp"
             if index == 0 =>
         {
             Some(typed_hint("", SqlType::DateTime))
@@ -2351,13 +2502,11 @@ fn function_arg_expectation(
         | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "degrees" | "radians" | "trunc"
         | "ceil" | "ceiling" | "floor" | "mod" | "sign" => float(),
         "randomblob" | "zeroblob" | "ntile" => int(),
-        "coalesce" | "ifnull" | "nullif" | "max" | "min" | "greatest" | "least" => {
-            previous
-                .iter()
-                .find(|c| c.type_info.sql_type != SqlType::Any)
-                .cloned()
-                .or_else(|| outer_expected.cloned())
-        }
+        "coalesce" | "ifnull" | "nullif" | "max" | "min" | "greatest" | "least" => previous
+            .iter()
+            .find(|c| c.type_info.sql_type != SqlType::Any)
+            .cloned()
+            .or_else(|| outer_expected.cloned()),
         "iif" | "if" => {
             if index == 0 {
                 None
