@@ -226,22 +226,37 @@ pub fn rewrite(
 
 /// PostgreSQL accepts a locking clause (`FOR UPDATE ... SKIP LOCKED`) before
 /// `LIMIT`/`OFFSET`, but sqlparser only parses it after them. Returns `sql`
-/// with a top-level locking clause moved after a following `LIMIT`/`OFFSET`,
-/// or `None` when there is nothing to move. Used only to parse: the original
-/// text is what gets executed.
+/// with each statement's top-level locking clause moved after a following
+/// `LIMIT`/`OFFSET`, or `None` when there is nothing to move. A clause never
+/// moves past the `;` ending its statement, so this is safe on a whole file.
+/// Used only to parse: the original text is what gets executed.
 pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<String> {
     let tokens = Tokenizer::new(dialect, sql).tokenize_with_location().ok()?;
     let mut line_starts = vec![0];
     line_starts.extend(sql.match_indices('\n').map(|(i, _)| i + 1));
     let offset = |location: Location| byte_offset(sql, &line_starts, location);
 
+    // (lock clause start, end of its last token, end of the statement's last
+    // token). LIMIT/OFFSET lies between the last two.
+    let mut moves: Vec<(usize, usize, usize)> = Vec::new();
     let mut depth = 0usize;
     let mut lock_start: Option<usize> = None;
-    let mut limit_start: Option<usize> = None;
+    let mut lock_end: Option<usize> = None;
+    // Ends before trailing whitespace and comments, so a moved clause is never
+    // placed inside a trailing `-- comment`.
+    let mut last_token_end = 0usize;
     for (index, token) in tokens.iter().enumerate() {
         match &token.token {
+            Token::Whitespace(_) => continue,
             Token::LParen => depth += 1,
             Token::RParen => depth = depth.saturating_sub(1),
+            Token::SemiColon if depth == 0 => {
+                if let (Some(lock), Some(lock_end)) = (lock_start, lock_end) {
+                    moves.push((lock, lock_end, last_token_end));
+                }
+                lock_start = None;
+                lock_end = None;
+            }
             Token::Word(w) if depth == 0 => {
                 if lock_start.is_none() && w.keyword == Keyword::FOR {
                     let next = next_significant(&tokens, index).map(|i| &tokens[i].token);
@@ -253,28 +268,36 @@ pub fn move_locking_after_limit(sql: &str, dialect: &dyn Dialect) -> Option<Stri
                         lock_start = Some(offset(token.span.start));
                     }
                 } else if lock_start.is_some()
+                    && lock_end.is_none()
                     && matches!(w.keyword, Keyword::LIMIT | Keyword::OFFSET)
                 {
-                    limit_start = Some(offset(token.span.start));
-                    break;
+                    lock_end = Some(last_token_end);
                 }
             }
             _ => {}
         }
+        last_token_end = offset(token.span.end);
     }
-
-    let (lock, limit) = (lock_start?, limit_start?);
-    let end = sql.trim_end().trim_end_matches(';').trim_end().len();
-    if limit >= end {
+    if let (Some(lock), Some(lock_end)) = (lock_start, lock_end) {
+        moves.push((lock, lock_end, last_token_end));
+    }
+    if moves.is_empty() {
         return None;
     }
-    Some(format!(
-        "{}{} {}{}",
-        &sql[..lock],
-        &sql[limit..end],
-        sql[lock..limit].trim_end(),
-        &sql[end..]
-    ))
+
+    let mut out = String::with_capacity(sql.len() + moves.len());
+    let mut cursor = 0;
+    for (lock, lock_end, end) in moves {
+        // Whitespace and comments between the clause and LIMIT stay in place,
+        // so a line comment there keeps the newline that ends it.
+        out.push_str(&sql[cursor..lock]);
+        out.push_str(sql[lock_end..end].trim_start());
+        out.push(' ');
+        out.push_str(&sql[lock..lock_end]);
+        cursor = end;
+    }
+    out.push_str(&sql[cursor..]);
+    Some(out)
 }
 
 /// MySQL reads `--` followed by any whitespace or control character (or the

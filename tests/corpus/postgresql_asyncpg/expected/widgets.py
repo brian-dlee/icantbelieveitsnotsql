@@ -308,3 +308,26 @@ async def claim_widgets(
     """Runs `claim_widgets`."""
     params = tuple(ClaimWidgetsParams(batch_size=batch_size).model_dump(by_alias=True).values())
     return [ClaimWidgetsRow.model_validate(_row_dict(ClaimWidgetsRow, row)) for row in await connection.fetch(CLAIM_WIDGETS, *params)]
+
+
+# ---- peek_next_widget (:one) ----
+
+
+class PeekNextWidgetRow(pydantic.BaseModel):
+    """One result row of `peek_next_widget`."""
+
+    id: int
+    name: str
+
+
+PEEK_NEXT_WIDGET = """
+SELECT id, name FROM next_widget
+"""
+
+
+async def peek_next_widget(
+    connection: asyncpg.Connection | asyncpg.Pool,
+) -> PeekNextWidgetRow | None:
+    """Runs `peek_next_widget`."""
+    row = await connection.fetchrow(PEEK_NEXT_WIDGET)
+    return PeekNextWidgetRow.model_validate(_row_dict(PeekNextWidgetRow, row)) if row is not None else None

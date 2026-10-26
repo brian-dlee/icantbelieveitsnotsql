@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use sqlparser::ast::Statement;
-use sqlparser::parser::Parser as SqlParser;
+use sqlparser::parser::{Parser as SqlParser, ParserError};
 
 use crate::analyze::{analyze_statement, analyze_view_columns, Param, StatementKind};
 use crate::config::Config;
@@ -85,12 +85,13 @@ fn normalize_contents(dialect: SqlDialect, contents: String) -> String {
     }
 }
 
-fn parse_single_statement(dialect: SqlDialect, sql: &str) -> Result<Statement, (String, usize)> {
+/// Parses `sql`, retrying a PostgreSQL parse failure with locking clauses
+/// moved after `LIMIT`/`OFFSET`. The error is always the original one.
+fn parse_statements(dialect: SqlDialect, sql: &str) -> Result<Vec<Statement>, ParserError> {
     let parser_dialect = dialect.parser_dialect();
-    let result = SqlParser::parse_sql(parser_dialect.as_ref(), sql);
-    // PostgreSQL allows `FOR UPDATE ... SKIP LOCKED` before `LIMIT`; retry with
-    // the clauses in the order sqlparser expects. The original text is kept.
-    let result = match result {
+    match SqlParser::parse_sql(parser_dialect.as_ref(), sql) {
+        // PostgreSQL allows `FOR UPDATE ... SKIP LOCKED` before `LIMIT`; retry
+        // with the clauses in the order sqlparser expects.
         Err(err) if dialect == SqlDialect::PostgreSQL => {
             match crate::paramstyle::move_locking_after_limit(sql, parser_dialect.as_ref()) {
                 Some(reordered) => {
@@ -100,7 +101,11 @@ fn parse_single_statement(dialect: SqlDialect, sql: &str) -> Result<Statement, (
             }
         }
         other => other,
-    };
+    }
+}
+
+fn parse_single_statement(dialect: SqlDialect, sql: &str) -> Result<Statement, (String, usize)> {
+    let result = parse_statements(dialect, sql);
     match result {
         Ok(mut statements) => match statements.len() {
             1 => Ok(statements.remove(0)),
@@ -178,7 +183,7 @@ pub fn run(project_root: &Path, write: bool) -> Result<Report, ButterError> {
         };
 
         let contents = normalize_contents(dialect, contents);
-        match SqlParser::parse_sql(parser_dialect.as_ref(), &contents) {
+        match parse_statements(dialect, &contents) {
             Ok(statements) => {
                 for statement in statements {
                     match &statement {
