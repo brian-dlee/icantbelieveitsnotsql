@@ -47,3 +47,6 @@ SELECT id, name FROM widgets
 ORDER BY id
 FOR UPDATE SKIP LOCKED
 LIMIT :batch_size;
+
+-- name: peek_next_widget :one
+SELECT id, name FROM next_widget;

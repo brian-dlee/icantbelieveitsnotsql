@@ -538,6 +538,34 @@ fn locking_clause_moves_after_limit_for_parsing() {
         move_locking_after_limit("SELECT id FROM t LIMIT 1 FOR UPDATE", &pg),
         None
     );
+    // A trailing comment stays after the moved clause instead of swallowing it.
+    assert_eq!(
+        move_locking_after_limit("SELECT id FROM t FOR UPDATE LIMIT 1 -- note\n;", &pg).as_deref(),
+        Some("SELECT id FROM t LIMIT 1 FOR UPDATE -- note\n;")
+    );
+    // Each statement of a file moves on its own; a `FOR UPDATE` in one never
+    // pairs with a `LIMIT` in the next.
+    assert_eq!(
+        move_locking_after_limit(
+            "CREATE POLICY p ON t FOR UPDATE USING (true);\n\
+             CREATE VIEW v AS SELECT id FROM t FOR SHARE LIMIT 1;\n\
+             SELECT id FROM t FOR UPDATE SKIP LOCKED OFFSET 2;",
+            &pg
+        )
+        .as_deref(),
+        Some(
+            "CREATE POLICY p ON t FOR UPDATE USING (true);\n\
+             CREATE VIEW v AS SELECT id FROM t LIMIT 1 FOR SHARE;\n\
+             SELECT id FROM t OFFSET 2 FOR UPDATE SKIP LOCKED;"
+        )
+    );
+    assert_eq!(
+        move_locking_after_limit(
+            "CREATE POLICY p ON t FOR UPDATE USING (true); SELECT id FROM t LIMIT 1",
+            &pg
+        ),
+        None
+    );
 }
 
 #[test]
